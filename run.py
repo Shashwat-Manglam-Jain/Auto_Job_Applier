@@ -220,32 +220,44 @@ async def run_pipeline():
     applications = []
     companies_processed = set()
 
+    unique_company_jobs = []
     for job in matched:
-        if len(applications) >= DAILY_EMAIL_CAP:
-            break
-
         company_key = job.get("company_name", "").lower().strip()
-        if company_key in companies_processed:
-            continue
-        companies_processed.add(company_key)
+        if company_key not in companies_processed:
+            companies_processed.add(company_key)
+            unique_company_jobs.append(job)
 
+    _CONTACT_BATCH = 5
+
+    async def _find_for_job(job):
         try:
             contacts = await find_contacts(
                 job.get("company_name", ""),
                 job.get("company_url", ""),
             )
+            results = []
             for contact in contacts:
                 if contact.get("confidence", 0) >= MIN_EMAIL_CONFIDENCE:
-                    applications.append({
+                    results.append({
                         **job,
                         "contact_email": contact["email"],
                         "contact_name": contact.get("name", ""),
                         "contact_title": contact.get("title", ""),
                         "contact_confidence": contact["confidence"],
                     })
+            return results
         except Exception as e:
             logger.warning("Contact discovery failed for %s: %s",
                           job.get("company_name", "?"), e)
+            return []
+
+    for batch_start in range(0, len(unique_company_jobs), _CONTACT_BATCH):
+        if len(applications) >= DAILY_EMAIL_CAP:
+            break
+        batch = unique_company_jobs[batch_start:batch_start + _CONTACT_BATCH]
+        batch_results = await asyncio.gather(*[_find_for_job(j) for j in batch])
+        for result_list in batch_results:
+            applications.extend(result_list)
 
     applications = _dedup_applications(applications)
     applications = applications[:DAILY_EMAIL_CAP]

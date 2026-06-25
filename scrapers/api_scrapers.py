@@ -339,47 +339,6 @@ class HNHiringScraper(BaseScraper):
         )
 
 
-class LandingJobsScraper(BaseScraper):
-    name = "landingjobs"
-
-    async def _scrape_impl(self) -> list[dict]:
-        try:
-            data = await self._get_json(
-                "https://landing.jobs/api/v1/offers?limit=50&remote=true"
-            )
-            # Response is a JSON array (not wrapped in an object)
-            items = data if isinstance(data, list) else data.get("offers", [])
-            jobs = []
-            for item in items:
-                date_val = item.get("published_at") or item.get("created_at")
-                if not self._is_today(date_val):
-                    continue
-                # No company name field; extract from URL path
-                # e.g. "https://landing.jobs/at/stellar-ai/senior-software-engineer-in-global"
-                company_name = ""
-                url = item.get("url", "")
-                if "/at/" in url:
-                    slug = url.split("/at/")[1].split("/")[0]
-                    company_name = slug.replace("-", " ").title()
-                description = item.get("role_description", "")
-                if description:
-                    from bs4 import BeautifulSoup as _BS
-                    description = _BS(description, "lxml").get_text(separator=" ", strip=True)
-                jobs.append(self._job(
-                    source_id=item.get("id", ""),
-                    url=url,
-                    title=item.get("title", ""),
-                    company_name=company_name,
-                    description=description,
-                    tags=item.get("tags", []),
-                    posted_at=str(date_val) if date_val else "",
-                ))
-            return jobs
-        except Exception:
-            logger.debug(f"[{self.name}] LandingJobs API failed")
-            return []
-
-
 class GreenhouseScraper(BaseScraper):
     name = "greenhouse"
     rate_limit = 1.0
@@ -406,6 +365,7 @@ class GreenhouseScraper(BaseScraper):
         "cloudflare": "Cloudflare",
         "anthropic": "Anthropic",
         "planetscale": "PlanetScale",
+        "cultureamp": "Culture Amp",
     }
 
     async def _scrape_impl(self) -> list[dict]:
@@ -460,6 +420,124 @@ class GreenhouseScraper(BaseScraper):
         return jobs
 
 
+class LeverScraper(BaseScraper):
+    name = "lever"
+    rate_limit = 1.0
+
+    COMPANIES = {
+        "sonarsource": "SonarSource",
+        "spotify": "Spotify",
+        "toptal": "Toptal",
+    }
+
+    async def _scrape_impl(self) -> list[dict]:
+        jobs = []
+        for slug, company_name in self.COMPANIES.items():
+            try:
+                resp = await self.client.get(
+                    f"https://api.lever.co/v0/postings/{slug}",
+                    timeout=15,
+                )
+                if resp.status_code == 404:
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                if not isinstance(data, list):
+                    continue
+                await asyncio.sleep(self.rate_limit)
+                for item in data:
+                    created = item.get("createdAt")
+                    if created and not self._is_today(created / 1000):
+                        continue
+
+                    cats = item.get("categories", {})
+                    location = cats.get("location", "")
+                    workplace = item.get("workplaceType", "")
+
+                    desc = item.get("descriptionPlain", "")
+
+                    jobs.append(self._job(
+                        source_id=item.get("id", ""),
+                        url=item.get("hostedUrl", ""),
+                        title=item.get("text", ""),
+                        company_name=company_name,
+                        company_url=f"https://jobs.lever.co/{slug}",
+                        description=desc[:2000],
+                        tags=[cats.get("department", ""), cats.get("team", "")],
+                        posted_at=str(created) if created else "",
+                        location=location or workplace or "Remote",
+                    ))
+            except Exception:
+                continue
+        return jobs
+
+
+class AshbyScraper(BaseScraper):
+    name = "ashby"
+    rate_limit = 1.0
+
+    COMPANIES = {
+        "openai": "OpenAI",
+        "notion": "Notion",
+        "ramp": "Ramp",
+        "linear": "Linear",
+        "supabase": "Supabase",
+        "airwallex": "Airwallex",
+        "plaid": "Plaid",
+        "snowflake": "Snowflake",
+        "vanta": "Vanta",
+        "clickup": "ClickUp",
+        "temporal": "Temporal",
+        "confluent": "Confluent",
+        "amplitude": "Amplitude",
+        "benchling": "Benchling",
+        "render": "Render",
+        "nerdwallet": "NerdWallet",
+    }
+
+    async def _scrape_impl(self) -> list[dict]:
+        jobs = []
+        for slug, company_name in self.COMPANIES.items():
+            try:
+                resp = await self.client.get(
+                    f"https://api.ashbyhq.com/posting-api/job-board/{slug}",
+                    timeout=20,
+                )
+                if resp.status_code == 404:
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                await asyncio.sleep(self.rate_limit)
+                for item in data.get("jobs", []):
+                    published = item.get("publishedAt", "")
+                    if published and not self._is_today(published):
+                        continue
+
+                    location = item.get("location", "")
+                    is_remote = item.get("isRemote", False)
+
+                    dept = item.get("department", "")
+                    team = item.get("team", "")
+                    tags = [t for t in [dept, team] if t]
+
+                    desc = item.get("descriptionPlain", "")
+
+                    jobs.append(self._job(
+                        source_id=item.get("id", ""),
+                        url=item.get("jobUrl", ""),
+                        title=item.get("title", ""),
+                        company_name=company_name,
+                        company_url=f"https://jobs.ashbyhq.com/{slug}",
+                        description=desc[:2000],
+                        tags=tags,
+                        posted_at=published,
+                        location=location if location else ("Remote" if is_remote else ""),
+                    ))
+            except Exception:
+                continue
+        return jobs
+
+
 def get_all_api_scrapers() -> list[BaseScraper]:
     return [
         RemoteOKScraper(),
@@ -469,6 +547,7 @@ def get_all_api_scrapers() -> list[BaseScraper]:
         HimalayasScraper(),
         TheMuseScraper(),
         HNHiringScraper(),
-        LandingJobsScraper(),
         GreenhouseScraper(),
+        LeverScraper(),
+        AshbyScraper(),
     ]

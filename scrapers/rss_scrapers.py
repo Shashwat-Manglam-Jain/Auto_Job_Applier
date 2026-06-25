@@ -272,6 +272,53 @@ class LaravelJobsScraper(BaseScraper):
             return []
 
 
+class VueJobsScraper(BaseScraper):
+    name = "vuejobs"
+    rate_limit = 2.0
+
+    async def _scrape_impl(self) -> list[dict]:
+        try:
+            resp = await self._get("https://vuejobs.com/feed")
+            feed = feedparser.parse(resp.text)
+            jobs = []
+            for entry in feed.entries:
+                pub_dt = _struct_time_to_dt(getattr(entry, "published_parsed", None))
+                if pub_dt is not None and not self._is_today(pub_dt):
+                    continue
+
+                url = getattr(entry, "link", "")
+                title = getattr(entry, "title", "")
+                if not url or not title:
+                    continue
+
+                if "?utm_source=" in url:
+                    url = url.split("?utm_source=")[0]
+
+                company_name = ""
+                slug = url.rstrip("/").rsplit("/", 1)[-1] if url else ""
+                if slug:
+                    parts = slug.rsplit("-", 1)
+                    if len(parts) >= 2:
+                        company_name = parts[0].replace("-", " ").title()
+
+                description = _strip_html(getattr(entry, "summary", ""))
+
+                jobs.append(self._job(
+                    source_id=hashlib.md5(url.encode()).hexdigest(),
+                    url=url,
+                    title=title,
+                    company_name=company_name,
+                    description=description[:2000],
+                    tags=["vue", "javascript", "frontend"],
+                    posted_at=pub_dt.isoformat() if pub_dt else "",
+                    location="Remote",
+                ))
+            return jobs
+        except Exception as e:
+            logger.error(f"[{self.name}] {e}")
+            return []
+
+
 def get_all_rss_scrapers() -> list[BaseScraper]:
     return [
         WeWorkRemotelyScraper(),
@@ -279,4 +326,5 @@ def get_all_rss_scrapers() -> list[BaseScraper]:
         GolangJobsScraper(),
         DribbbleJobsScraper(),
         LaravelJobsScraper(),
+        VueJobsScraper(),
     ]

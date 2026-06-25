@@ -129,54 +129,28 @@ async def find_contacts(company_name: str, company_url: str) -> list[dict]:
 
     logger.debug("[%s] Generated guesses for %d named contacts", company_name, len(named_contacts))
 
-    # Last resort: if we have very few email-bearing contacts, try harder
-    email_bearing = [c for c in all_results if c.get("email")]
-    if len(email_bearing) < 3 and domain:
-        logger.info("[%s] Few contacts found (%d), trying last resort strategies", company_name, len(email_bearing))
-
-        # Strategy: search for exact domain email addresses
-        from contacts.search_engine import search_contacts as _search
-        try:
-            domain_search_results = await _search(
-                f'"@{domain}"', domain
-            )
-            for c in domain_search_results:
-                c.setdefault("confidence", 0.35)
-                c.setdefault("source", "last_resort_domain_search")
-            all_results.extend(domain_search_results)
-            logger.debug("[%s] Domain search found %d extra contacts", company_name, len(domain_search_results))
-        except Exception as e:
-            logger.debug("[%s] Last resort domain search failed: %s", company_name, e)
-
-        # Strategy: try common founder/exec email patterns as last resort
-        last_resort_prefixes = [
-            ("founders", 0.15),
-            ("ceo", 0.15),
-            ("founder", 0.15),
-            ("team", 0.15),
-        ]
-        for prefix, conf in last_resort_prefixes:
-            all_results.append({
-                "email": f"{prefix}@{domain}",
-                "name": "",
-                "title": "",
-                "confidence": conf,
-                "source": "last_resort_guess",
-            })
-
     merged = _merge_contacts(all_results)
 
     # Filter out obviously bad email patterns
     merged = [c for c in merged if not _is_obviously_bad_email(c["email"])]
 
-    # SMTP verification: filter out emails the mail server explicitly rejects
-    verified = []
-    for contact in merged:
-        if verify_email_exists(contact["email"]):
-            verified.append(contact)
+    # Cap candidates before expensive SMTP verification
+    MAX_VERIFY = 20
+    candidates = merged[:MAX_VERIFY]
+
+    # SMTP verification: run concurrently with a semaphore to limit connections
+    _smtp_sem = asyncio.Semaphore(8)
+
+    async def _verify_one(contact):
+        async with _smtp_sem:
+            ok = await asyncio.to_thread(verify_email_exists, contact["email"])
+            return contact if ok else None
+
+    results = await asyncio.gather(*[_verify_one(c) for c in candidates])
+    verified = [c for c in results if c is not None]
 
     logger.info("[%s] Final: %d verified contacts from %d candidates",
-                company_name, len(verified), len(merged))
+                company_name, len(verified), len(candidates))
     for c in verified[:5]:
         logger.debug("[%s]   %s (%s) — confidence=%.2f, source=%s",
                      company_name, c["email"], c.get("title", ""), c["confidence"], c["source"])

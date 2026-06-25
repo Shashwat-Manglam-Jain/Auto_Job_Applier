@@ -5,8 +5,18 @@ import socket
 from urllib.parse import urlparse
 
 
+_mx_cache: dict[str, list | None] = {}
+
+ATS_DOMAINS = {
+    "boards.greenhouse.io", "api.lever.co", "jobs.lever.co",
+    "api.ashbyhq.com", "jobs.ashbyhq.com", "boards.eu.greenhouse.io",
+    "jobs.workable.com", "jobs.smartrecruiters.com", "apply.workable.com",
+    "jobs.jobvite.com", "careers.jobscore.com", "bamboohr.com",
+}
+
+
 def get_domain_from_url(url: str) -> str:
-    """Extract domain from a company URL."""
+    """Extract domain from a company URL. Returns '' for ATS board URLs."""
     if not url:
         return ""
     if not url.startswith(("http://", "https://")):
@@ -14,6 +24,8 @@ def get_domain_from_url(url: str) -> str:
     parsed = urlparse(url)
     domain = parsed.netloc or parsed.path.split("/")[0]
     domain = domain.lower().removeprefix("www.")
+    if domain in ATS_DOMAINS:
+        return ""
     return domain
 
 
@@ -22,13 +34,24 @@ def _domain_from_name(company_name: str) -> str:
     return f"{cleaned}.com"
 
 
-def has_valid_mx(domain: str) -> bool:
-    """Check if domain has MX records (can receive email)."""
+def _get_mx_records(domain: str) -> list | None:
+    """Get MX records with caching. Returns sorted list or None."""
+    if domain in _mx_cache:
+        return _mx_cache[domain]
     try:
         answers = dns.resolver.resolve(domain, "MX")
-        return len(answers) > 0
+        records = sorted(answers, key=lambda r: r.preference)
+        _mx_cache[domain] = records
+        return records
     except Exception:
-        return False
+        _mx_cache[domain] = None
+        return None
+
+
+def has_valid_mx(domain: str) -> bool:
+    """Check if domain has MX records (can receive email)."""
+    records = _get_mx_records(domain)
+    return records is not None and len(records) > 0
 
 
 import logging
@@ -61,16 +84,12 @@ def verify_email_exists(email: str) -> bool:
     except IndexError:
         return False
 
-    if not has_valid_mx(domain):
+    mx_records = _get_mx_records(domain)
+    if not mx_records:
         _logger.debug("No MX records for %s — rejecting", domain)
         return False
 
-    try:
-        mx_records = dns.resolver.resolve(domain, "MX")
-        mx_sorted = sorted(mx_records, key=lambda r: r.preference)
-        mx_host = str(mx_sorted[0].exchange).rstrip(".")
-    except Exception:
-        return False
+    mx_host = str(mx_records[0].exchange).rstrip(".")
 
     if _is_outlook_mx(mx_host):
         _logger.debug("Outlook/O365 domain %s — skipping SMTP check, accepting", domain)

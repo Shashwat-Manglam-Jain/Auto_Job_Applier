@@ -343,6 +343,212 @@ class ArcDevScraper(BaseScraper):
             return []
 
 
+class LinkedInGuestScraper(BaseScraper):
+    name = "linkedin"
+    rate_limit = 3.0
+
+    SEARCHES = [
+        "remote+software+engineer",
+        "remote+developer",
+        "remote+backend+engineer",
+    ]
+
+    async def _scrape_impl(self) -> list[dict]:
+        try:
+            jobs = []
+            seen = set()
+            for query in self.SEARCHES:
+                for start in (0, 25):
+                    try:
+                        resp = await self._get(
+                            f"https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
+                            f"?keywords={query}&f_WT=2&f_TPR=r86400&start={start}"
+                        )
+                    except Exception:
+                        continue
+                    soup = BeautifulSoup(resp.text, "lxml")
+                    cards = soup.select("li div.base-card")
+                    for card in cards:
+                        title_el = card.select_one("h3.base-search-card__title")
+                        company_el = card.select_one("h4.base-search-card__subtitle")
+                        link_el = card.select_one("a.base-card__full-link") or card.find("a", href=True)
+                        date_el = card.select_one("time")
+                        loc_el = card.select_one(".job-search-card__location")
+
+                        if not title_el or not link_el:
+                            continue
+
+                        href = link_el.get("href", "")
+                        if not href:
+                            continue
+                        clean_url = href.split("?")[0]
+                        if clean_url in seen:
+                            continue
+                        seen.add(clean_url)
+
+                        date_str = date_el.get("datetime") if date_el else None
+                        if date_str and not self._is_today(date_str):
+                            continue
+
+                        jobs.append(self._job(
+                            source_id=hashlib.md5(clean_url.encode()).hexdigest(),
+                            url=clean_url,
+                            title=_text(title_el),
+                            company_name=_text(company_el),
+                            location=_text(loc_el) or "Remote",
+                            posted_at=date_str or "",
+                        ))
+            return jobs
+        except Exception as e:
+            logger.error(f"[{self.name}] {e}")
+            return []
+
+
+class DailyRemoteScraper(BaseScraper):
+    name = "dailyremote"
+    rate_limit = 3.0
+
+    async def _scrape_impl(self) -> list[dict]:
+        try:
+            resp = await self._get("https://dailyremote.com/remote-software-development-jobs")
+            soup = BeautifulSoup(resp.text, "lxml")
+
+            jobs = []
+            seen = set()
+            for link in soup.select('a[href*="/remote-job/"]'):
+                title = link.get_text(strip=True)
+                if not title or title.upper() == "APPLY":
+                    continue
+                href = link.get("href", "")
+                if not href or href in seen:
+                    continue
+                seen.add(href)
+
+                job_url = urljoin("https://dailyremote.com", href)
+
+                parent = link.parent
+                gparent = parent.parent if parent else None
+                company_name = ""
+                posted_ago = ""
+                if gparent:
+                    company_div = gparent.select_one(".company-name")
+                    if company_div:
+                        spans = company_div.find_all("span")
+                        if spans:
+                            company_name = spans[0].get_text(strip=True)
+                        for span in spans:
+                            text = span.get_text(strip=True)
+                            if "ago" in text.lower():
+                                posted_ago = text
+
+                if posted_ago:
+                    ago_lower = posted_ago.lower()
+                    if any(x in ago_lower for x in ["week", "month", "year"]):
+                        continue
+
+                jobs.append(self._job(
+                    source_id=hashlib.md5(job_url.encode()).hexdigest(),
+                    url=job_url,
+                    title=title,
+                    company_name=company_name,
+                    location="Remote",
+                    posted_at=posted_ago,
+                ))
+            return jobs
+        except Exception as e:
+            logger.error(f"[{self.name}] {e}")
+            return []
+
+
+class EURemoteJobsScraper(BaseScraper):
+    name = "euremotejobs"
+    rate_limit = 3.0
+
+    async def _scrape_impl(self) -> list[dict]:
+        try:
+            resp = await self._get("https://euremotejobs.com/")
+            soup = BeautifulSoup(resp.text, "lxml")
+
+            jobs = []
+            cards = soup.select("a.job-card-link")
+            for card in cards:
+                job_url = card.get("href", "")
+                if not job_url or "/job/" not in job_url:
+                    continue
+
+                title_el = card.select_one("h2.job-title")
+                title = _text(title_el) if title_el else ""
+                if not title:
+                    continue
+
+                logo_img = card.select_one("img.company_logo")
+                company_name = logo_img.get("alt", "") if logo_img else ""
+
+                posted_el = card.select_one("[class*='date'], [class*='posted'], time")
+                posted_text = _text(posted_el) if posted_el else card.get_text(" ", strip=True)
+                posted_lower = posted_text.lower()
+                if any(x in posted_lower for x in ["months ago", "year ago", "years ago"]):
+                    continue
+
+                loc_el = card.select_one("[class*='location']")
+                location = _text(loc_el) if loc_el else "Europe Remote"
+
+                jobs.append(self._job(
+                    source_id=hashlib.md5(job_url.encode()).hexdigest(),
+                    url=job_url,
+                    title=title,
+                    company_name=company_name,
+                    location=location or "Europe Remote",
+                    tags=["remote", "europe"],
+                ))
+            return jobs
+        except Exception as e:
+            logger.error(f"[{self.name}] {e}")
+            return []
+
+
+class YCJobsScraper(BaseScraper):
+    name = "ycjobs"
+    rate_limit = 3.0
+
+    async def _scrape_impl(self) -> list[dict]:
+        try:
+            resp = await self._get("https://www.ycombinator.com/jobs")
+            soup = BeautifulSoup(resp.text, "lxml")
+
+            jobs = []
+            seen = set()
+            for link in soup.select('a[href*="/companies/"][href*="/jobs/"]'):
+                href = link.get("href", "")
+                if href in seen:
+                    continue
+                seen.add(href)
+
+                job_url = urljoin("https://www.ycombinator.com", href)
+                title = link.get_text(strip=True)
+                if not title or len(title) < 3:
+                    continue
+
+                company_name = ""
+                parts = href.split("/companies/")
+                if len(parts) > 1:
+                    slug = parts[1].split("/")[0]
+                    company_name = slug.replace("-", " ").title()
+
+                jobs.append(self._job(
+                    source_id=hashlib.md5(job_url.encode()).hexdigest(),
+                    url=job_url,
+                    title=title,
+                    company_name=company_name,
+                    tags=["yc", "startup"],
+                    location="Remote",
+                ))
+            return jobs
+        except Exception as e:
+            logger.error(f"[{self.name}] {e}")
+            return []
+
+
 def get_all_html_scrapers() -> list[BaseScraper]:
     return [
         NoDeskScraper(),
@@ -350,4 +556,8 @@ def get_all_html_scrapers() -> list[BaseScraper]:
         FourDayWeekScraper(),
         BuiltInScraper(),
         ArcDevScraper(),
+        LinkedInGuestScraper(),
+        DailyRemoteScraper(),
+        EURemoteJobsScraper(),
+        YCJobsScraper(),
     ]

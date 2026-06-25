@@ -206,6 +206,15 @@ def _find_team_member_links(soup: BeautifulSoup, base_url: str) -> list[str]:
     return links
 
 
+_ATS_HOSTS = {
+    "boards.greenhouse.io", "boards.eu.greenhouse.io",
+    "api.lever.co", "jobs.lever.co",
+    "api.ashbyhq.com", "jobs.ashbyhq.com",
+    "jobs.workable.com", "apply.workable.com",
+    "jobs.smartrecruiters.com", "jobs.jobvite.com",
+}
+
+
 async def scrape_company_contacts(company_url: str) -> list[dict]:
     """
     Scrape company website /about, /team, /contact pages for emails and names.
@@ -215,6 +224,11 @@ async def scrape_company_contacts(company_url: str) -> list[dict]:
         return []
     if not company_url.startswith(("http://", "https://")):
         company_url = "https://" + company_url
+
+    from urllib.parse import urlparse
+    host = urlparse(company_url).netloc.lower().removeprefix("www.")
+    if host in _ATS_HOSTS:
+        return []
 
     base_url = company_url.rstrip("/")
     all_contacts = []

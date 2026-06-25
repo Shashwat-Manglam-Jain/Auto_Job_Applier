@@ -164,37 +164,15 @@ async def _search_google_api(client: httpx.AsyncClient, query: str) -> list[dict
     return []
 
 
-async def _search_google_scrape(client: httpx.AsyncClient, query: str) -> list[dict]:
-    """Scrape Google search results directly as fallback."""
-    resp = await client.get(
-        "https://www.google.com/search",
-        params={"q": query, "num": 10, "hl": "en"},
-        headers=_random_headers(),
-        timeout=15,
-    )
-    if resp.status_code != 200:
-        return []
-
-    soup = BeautifulSoup(resp.text, "html.parser")
-    contacts = []
-    for div in soup.find_all("div", class_="BNeawe"):
-        text = div.get_text(separator=" ", strip=True)
-        contacts.extend(_extract_contacts_from_text(text, "google"))
-    for span in soup.find_all("span"):
-        text = span.get_text(separator=" ", strip=True)
-        found = _extract_contacts_from_text(text, "google")
-        contacts.extend(found)
-    return contacts
-
-
 async def _search_ddg(client: httpx.AsyncClient, query: str) -> list[dict]:
     resp = await client.get(
         "https://html.duckduckgo.com/html/",
         params={"q": query},
         headers=_random_headers(),
-        timeout=15,
+        timeout=10,
     )
-    resp.raise_for_status()
+    if resp.status_code != 200:
+        return []
     soup = BeautifulSoup(resp.text, "html.parser")
 
     contacts = []
@@ -211,9 +189,9 @@ async def _search_ddg_api(client: httpx.AsyncClient, query: str) -> list[dict]:
             "https://api.duckduckgo.com/",
             params={"q": query, "format": "json", "no_html": "1", "skip_disambig": "1"},
             headers=_random_headers(),
-            timeout=10,
+            timeout=8,
         )
-        if resp.status_code != 200:
+        if resp.status_code not in (200, 202):
             return []
         data = resp.json()
         contacts = []
@@ -236,9 +214,10 @@ async def _search_bing(client: httpx.AsyncClient, query: str) -> list[dict]:
         "https://www.bing.com/search",
         params={"q": query},
         headers=_random_headers(),
-        timeout=15,
+        timeout=10,
     )
-    resp.raise_for_status()
+    if resp.status_code != 200:
+        return []
     soup = BeautifulSoup(resp.text, "html.parser")
 
     contacts = []
@@ -249,71 +228,65 @@ async def _search_bing(client: httpx.AsyncClient, query: str) -> list[dict]:
 
 
 async def _search_all_engines(client: httpx.AsyncClient, query: str) -> list[dict]:
-    """Try DDG and Bing for every query, merge results. Fall back to Google scrape if both fail."""
+    """Try DDG, DDG API, and Bing concurrently."""
+    results = await asyncio.gather(
+        _search_ddg(client, query),
+        _search_ddg_api(client, query),
+        _search_bing(client, query),
+        return_exceptions=True,
+    )
+
     all_results = []
-
-    # Always try DDG first (most reliable)
-    try:
-        ddg_results = await _search_ddg(client, query)
-        all_results.extend(ddg_results)
-    except Exception as e:
-        logger.debug("DDG search failed: %s", str(e)[:50])
-
-    # Also try DDG instant answer API
-    try:
-        ddg_api_results = await _search_ddg_api(client, query)
-        all_results.extend(ddg_api_results)
-    except Exception as e:
-        logger.debug("DDG API search failed: %s", str(e)[:50])
-
-    # Also try Bing for extra results
-    try:
-        bing_results = await _search_bing(client, query)
-        all_results.extend(bing_results)
-    except Exception as e:
-        logger.debug("Bing search failed: %s", str(e)[:50])
-
-    # Fall back to Google scrape only if both failed
-    if not all_results:
-        try:
-            google_results = await _search_google_scrape(client, query)
-            all_results.extend(google_results)
-        except Exception as e:
-            logger.debug("Google scrape failed: %s", str(e)[:50])
+    for r in results:
+        if isinstance(r, list):
+            all_results.extend(r)
 
     return all_results
+
+
+async def _run_query(client: httpx.AsyncClient, query: str, use_google_api: bool, query_idx: int) -> list[dict]:
+    """Run a single search query across all engines."""
+    results = []
+    if use_google_api and query_idx < 3:
+        google_results = await _search_google_api(client, query)
+        results.extend(google_results)
+    engine_results = await _search_all_engines(client, query)
+    results.extend(engine_results)
+    return results
+
+
+_QUERY_BATCH_SIZE = 4
 
 
 async def search_contacts(company_name: str, domain: str) -> list[dict]:
     queries = [
         f'"{company_name}" HR email hiring manager',
         f'"{company_name}" CTO OR CEO email contact',
-        f'"@{domain}" hiring OR HR OR recruiter',
         f'site:linkedin.com/in "{company_name}" CTO OR "head of engineering"',
         f'"{company_name}" careers team email',
         f'"{company_name}" engineering manager email',
         f'"{company_name}" "people operations" OR "talent acquisition" email',
-        f'site:twitter.com OR site:x.com "{company_name}" CTO OR CEO',
     ]
+    if domain:
+        queries.insert(2, f'"@{domain}" hiring OR HR OR recruiter')
 
     all_contacts = []
     use_google_api = bool(GOOGLE_API_KEYS) and bool(GOOGLE_CSE_ID)
 
     try:
         async with httpx.AsyncClient(follow_redirects=True) as client:
-            for i, query in enumerate(queries):
-                try:
-                    results = []
-                    if use_google_api and i < 3:
-                        google_results = await _search_google_api(client, query)
-                        results.extend(google_results)
-                    engine_results = await _search_all_engines(client, query)
-                    results.extend(engine_results)
-                    all_contacts.extend(results)
-                except Exception as e:
-                    logger.debug("All searches failed for: %s", query[:50])
-
-                await asyncio.sleep(random.uniform(1.5, 3))
+            for batch_start in range(0, len(queries), _QUERY_BATCH_SIZE):
+                batch = queries[batch_start:batch_start + _QUERY_BATCH_SIZE]
+                batch_results = await asyncio.gather(
+                    *[_run_query(client, q, use_google_api, batch_start + i)
+                      for i, q in enumerate(batch)],
+                    return_exceptions=True,
+                )
+                for r in batch_results:
+                    if isinstance(r, list):
+                        all_contacts.extend(r)
+                if batch_start + _QUERY_BATCH_SIZE < len(queries):
+                    await asyncio.sleep(random.uniform(0.5, 1.5))
     except Exception:
         logger.warning("Contact search completely failed for %s", company_name)
         return []
