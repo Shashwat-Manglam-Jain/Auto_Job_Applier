@@ -1,0 +1,67 @@
+name: Daily Auto-Apply
+
+on:
+  schedule:
+    - cron: '30 0 * * *'  # 6:00 AM IST (00:30 UTC)
+  workflow_dispatch:       # manual trigger via GitHub UI
+
+jobs:
+  auto-apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run auto-apply pipeline
+        env:
+          # Personal details
+          YOUR_NAME: ${{ secrets.YOUR_NAME }}
+          YOUR_EMAIL: ${{ secrets.YOUR_EMAIL }}
+          YOUR_PHONE: ${{ secrets.YOUR_PHONE }}
+          YOUR_LOCATION: ${{ secrets.YOUR_LOCATION }}
+          YOUR_LINKEDIN: ${{ secrets.YOUR_LINKEDIN }}
+          YOUR_GITHUB: ${{ secrets.YOUR_GITHUB }}
+          YOUR_PORTFOLIO: ${{ secrets.YOUR_PORTFOLIO }}
+          YOUR_EDUCATION: ${{ secrets.YOUR_EDUCATION }}
+          YOUR_GRADUATION_YEAR: ${{ secrets.YOUR_GRADUATION_YEAR }}
+          # Work experience
+          COMPANY_1_NAME: ${{ secrets.COMPANY_1_NAME }}
+          COMPANY_1_ROLE: ${{ secrets.COMPANY_1_ROLE }}
+          COMPANY_1_LOCATION: ${{ secrets.COMPANY_1_LOCATION }}
+          COMPANY_1_DURATION: ${{ secrets.COMPANY_1_DURATION }}
+          COMPANY_2_NAME: ${{ secrets.COMPANY_2_NAME }}
+          COMPANY_2_ROLE: ${{ secrets.COMPANY_2_ROLE }}
+          COMPANY_2_LOCATION: ${{ secrets.COMPANY_2_LOCATION }}
+          COMPANY_2_DURATION: ${{ secrets.COMPANY_2_DURATION }}
+          # SMTP accounts
+          SMTP_ACCOUNT_1: ${{ secrets.SMTP_ACCOUNT_1 }}
+          SMTP_PASSWORD_1: ${{ secrets.SMTP_PASSWORD_1 }}
+          SMTP_ACCOUNT_2: ${{ secrets.SMTP_ACCOUNT_2 }}
+          SMTP_PASSWORD_2: ${{ secrets.SMTP_PASSWORD_2 }}
+          SMTP_ACCOUNT_3: ${{ secrets.SMTP_ACCOUNT_3 }}
+          SMTP_PASSWORD_3: ${{ secrets.SMTP_PASSWORD_3 }}
+          # AI API keys (round-robin)
+          GROQ_API_KEY_1: ${{ secrets.GROQ_API_KEY_1 }}
+          GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
+          GEMINI_API_KEY_1: ${{ secrets.GEMINI_API_KEY_1 }}
+          GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
+          # Google Custom Search (optional)
+          GOOGLE_API_KEY_1: ${{ secrets.GOOGLE_API_KEY_1 }}
+          GOOGLE_API_KEY_2: ${{ secrets.GOOGLE_API_KEY_2 }}
+          GOOGLE_CSE_ID: ${{ secrets.GOOGLE_CSE_ID }}
+          # Pipeline settings
+          MODE: ${{ secrets.MODE || 'prod' }}
+          DAILY_EMAIL_CAP: ${{ secrets.DAILY_EMAIL_CAP || '1000' }}
+          PER_ACCOUNT_CAP: ${{ secrets.PER_ACCOUNT_CAP || '500' }}
+          REPORT_TO_EMAIL: ${{ secrets.REPORT_TO_EMAIL }}
+        run: python run.py

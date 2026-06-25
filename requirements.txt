@@ -1,0 +1,8 @@
+httpx
+beautifulsoup4
+feedparser
+dnspython
+openpyxl
+lxml
+fpdf2
+python-dotenv
