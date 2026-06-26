@@ -19,7 +19,7 @@ USER_AGENTS = [
 
 class BaseScraper(ABC):
     name: str = "base"
-    rate_limit: float = 2.0
+    rate_limit: float = 1.0
 
     def __init__(self):
         self.client = httpx.AsyncClient(

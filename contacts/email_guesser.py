@@ -1,9 +1,9 @@
 import dns.resolver
 import re
-import smtplib
-import socket
+import logging
 from urllib.parse import urlparse
 
+_logger = logging.getLogger(__name__)
 
 _mx_cache: dict[str, list | None] = {}
 
@@ -12,11 +12,15 @@ ATS_DOMAINS = {
     "api.ashbyhq.com", "jobs.ashbyhq.com", "boards.eu.greenhouse.io",
     "jobs.workable.com", "jobs.smartrecruiters.com", "apply.workable.com",
     "jobs.jobvite.com", "careers.jobscore.com", "bamboohr.com",
+    "himalayas.app", "remoteok.com", "remotive.com", "weworkremotely.com",
+    "justremote.co", "nodesk.co", "dynamitejobs.com", "workingnomads.co",
+    "arbeitnow.com", "jobicy.com", "themuse.com", "wellfound.com",
+    "angel.co", "linkedin.com", "indeed.com", "glassdoor.com",
+    "dribbble.com", "larajobs.com", "vuejobs.com", "findwork.dev",
 }
 
 
 def get_domain_from_url(url: str) -> str:
-    """Extract domain from a company URL. Returns '' for ATS board URLs."""
     if not url:
         return ""
     if not url.startswith(("http://", "https://")):
@@ -35,7 +39,6 @@ def _domain_from_name(company_name: str) -> str:
 
 
 def _get_mx_records(domain: str) -> list | None:
-    """Get MX records with caching. Returns sorted list or None."""
     if domain in _mx_cache:
         return _mx_cache[domain]
     try:
@@ -49,72 +52,8 @@ def _get_mx_records(domain: str) -> list | None:
 
 
 def has_valid_mx(domain: str) -> bool:
-    """Check if domain has MX records (can receive email)."""
     records = _get_mx_records(domain)
     return records is not None and len(records) > 0
-
-
-import logging
-_logger = logging.getLogger(__name__)
-
-OUTLOOK_MX_MARKERS = [
-    "outlook", "protection.outlook", "microsoft", "office365",
-    "hotmail", "live.com", "exchangelabs",
-]
-
-
-def _is_outlook_mx(mx_host: str) -> bool:
-    mx_lower = mx_host.lower()
-    return any(m in mx_lower for m in OUTLOOK_MX_MARKERS)
-
-
-def verify_email_exists(email: str) -> bool:
-    """
-    Verify that an email address exists via SMTP RCPT TO check.
-
-    Returns True only if the server explicitly accepts (250/251) the recipient.
-    Returns False if the server rejects or if verification is inconclusive.
-
-    For Outlook/O365 domains: these servers accept all RCPT TO commands (catch-all),
-    so SMTP verification is unreliable. For those, we just check MX records exist
-    and return True only for high-confidence patterns (not generic guesses).
-    """
-    try:
-        domain = email.split("@", 1)[1]
-    except IndexError:
-        return False
-
-    mx_records = _get_mx_records(domain)
-    if not mx_records:
-        _logger.debug("No MX records for %s — rejecting", domain)
-        return False
-
-    mx_host = str(mx_records[0].exchange).rstrip(".")
-
-    if _is_outlook_mx(mx_host):
-        _logger.debug("Outlook/O365 domain %s — skipping SMTP check, accepting", domain)
-        return True
-
-    try:
-        smtp = smtplib.SMTP(timeout=8)
-        smtp.connect(mx_host, 25)
-        smtp.helo("verify.local")
-        smtp.mail("verify@verify.local")
-        code, msg = smtp.rcpt(email)
-        smtp.quit()
-
-        if code in (250, 251):
-            return True
-        if code >= 550:
-            _logger.debug("SMTP rejected %s: %d %s", email, code, msg)
-            return False
-        return False
-    except (smtplib.SMTPServerDisconnected, smtplib.SMTPConnectError,
-            smtplib.SMTPResponseException, socket.timeout,
-            ConnectionRefusedError, OSError):
-        return False
-    except Exception:
-        return False
 
 
 def _split_name(contact_name: str) -> tuple[str, str]:
@@ -129,10 +68,6 @@ def _split_name(contact_name: str) -> tuple[str, str]:
 def guess_emails(
     company_name: str, company_url: str, contact_name: str = ""
 ) -> list[dict]:
-    """
-    Generate possible email addresses for a company.
-    Returns list of {"email": str, "confidence": float, "source": str}
-    """
     domain = get_domain_from_url(company_url)
     if not domain:
         domain = _domain_from_name(company_name)
@@ -143,40 +78,16 @@ def guess_emails(
     candidates = []
 
     if not contact_name:
-        generic = [
-            ("hr", 0.3),
-            ("hiring", 0.3),
-            ("careers", 0.3),
-            ("jobs", 0.3),
-            ("info", 0.2),
-            ("hello", 0.2),
-            ("talent", 0.25),
-            ("recruit", 0.25),
-            ("people", 0.2),
-            ("recruitment", 0.25),
-            ("team", 0.2),
-            ("apply", 0.2),
-            ("work", 0.2),
-            ("contact", 0.2),
-        ]
-        for prefix, confidence in generic:
-            candidates.append({
-                "email": f"{prefix}@{domain}",
-                "confidence": confidence,
-                "source": "guess_generic",
-            })
+        return []
     else:
         first, last = _split_name(contact_name)
         if not first:
             return candidates
 
         patterns = [
-            (f"{first}@{domain}", 0.5),
-            (f"{first}.{last}@{domain}", 0.5) if last else None,
-            (f"{first[0]}{last}@{domain}", 0.4) if last else None,
-            (f"{first[0]}.{last}@{domain}", 0.4) if last else None,
-            (f"{last}@{domain}", 0.3) if last else None,
-            (f"{first}{last}@{domain}", 0.3) if last else None,
+            (f"{first}.{last}@{domain}", 0.55) if last else None,
+            (f"{first}@{domain}", 0.45),
+            (f"{first[0]}{last}@{domain}", 0.40) if last else None,
         ]
         for entry in patterns:
             if entry is None:
@@ -187,19 +98,5 @@ def guess_emails(
                 "confidence": confidence,
                 "source": "guess_named",
             })
-
-    # Boost confidence for domains with valid MX records
-    # (we already checked has_valid_mx above, so all candidates here have valid MX)
-    # If domain actually resolves (not just MX), give extra confidence
-    try:
-        import socket as _socket
-        _socket.getaddrinfo(domain, 80)
-        domain_resolves = True
-    except Exception:
-        domain_resolves = False
-
-    if domain_resolves:
-        for c in candidates:
-            c["confidence"] = min(c["confidence"] + 0.1, 0.9)
 
     return candidates

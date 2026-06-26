@@ -12,7 +12,6 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
 ]
 
 EMAIL_REGEX = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
@@ -31,20 +30,92 @@ TITLE_PATTERNS = re.compile(
 NAME_PATTERN = re.compile(r"\b([A-Z][a-z]{2,15} [A-Z][a-z]{2,15})\b")
 
 NON_NAME_WORDS = {
-    "browser", "company", "login", "page", "search", "google", "bing",
-    "click", "here", "sign", "view", "more", "read", "open", "close",
-    "home", "about", "contact", "privacy", "terms", "cookie", "accept",
-    "loading", "error", "next", "prev", "back", "submit", "download",
-    "remote", "hybrid", "onsite", "senior", "junior", "lead", "staff",
-    "engineer", "developer", "manager", "director", "software", "data",
-    "product", "design", "sales", "marketing", "finance", "legal",
-    "apply", "save", "share", "report", "jobs", "hiring", "career",
-    "india", "united", "states", "america", "europe", "london", "york",
-    "customer", "support", "service", "project", "platform", "system",
-    "digital", "global", "world", "today", "this", "that", "with",
-    "mobile", "desktop", "windows", "linux", "chrome", "firefox",
-    "key", "value", "link", "site", "web", "app", "tech", "full",
-    "time", "part", "work", "working", "stack", "overflow",
+    "about", "accept", "access", "account", "action", "active", "admin",
+    "after", "also", "america", "android", "angular", "annual", "another",
+    "apple", "apply", "approach", "area", "article", "available",
+    "back", "based", "been", "before", "being", "best", "between",
+    "browser", "build", "business", "button",
+    "call", "came", "canada", "career", "center", "change", "check",
+    "chrome", "city", "click", "close", "cloud", "code", "come",
+    "community", "company", "connect", "contact", "continue", "cookie",
+    "corporate", "could", "country", "create", "current", "customer",
+    "daily", "dashboard", "data", "date", "deep", "demo", "department",
+    "design", "desktop", "detail", "developer", "digital", "director",
+    "discover", "does", "down", "download", "drive",
+    "each", "easy", "email", "employee", "enable", "energy", "engineer",
+    "enterprise", "error", "europe", "even", "event", "every", "example",
+    "experience", "explore", "external",
+    "facebook", "fast", "feature", "feedback", "file", "filter", "finance",
+    "financial", "find", "firefox", "first", "follow", "form", "found",
+    "free", "from", "full", "future",
+    "general", "generate", "getting", "give", "global", "good", "great",
+    "green", "group", "grow", "growth", "guide",
+    "have", "help", "here", "high", "hiring", "home", "host", "hour", "house",
+    "human",
+    "idea", "impact", "improve", "include", "india", "industry",
+    "information", "infrastructure", "inside", "instagram", "internal",
+    "into", "issue",
+    "jobs", "join", "just",
+    "keep", "key",
+    "large", "last", "latest", "launch", "lead", "leading", "learn",
+    "legal", "level", "life", "like", "link", "linkedin", "linux",
+    "list", "live", "loading", "local", "location", "login", "london",
+    "long", "look",
+    "made", "main", "make", "manage", "manager", "many", "market",
+    "marketing", "match", "media", "meet", "member", "message",
+    "million", "mobile", "model", "month", "more", "most", "move",
+    "much", "must",
+    "name", "need", "network", "never", "news", "next", "north",
+    "note", "number",
+    "offer", "office", "often", "only", "open", "operation", "option",
+    "order", "other", "over", "overview", "own",
+    "page", "paid", "part", "partner", "past", "path", "people",
+    "percent", "performance", "person", "phone", "place", "plan",
+    "platform", "play", "please", "plus", "point", "policy", "post",
+    "power", "practice", "press", "prev", "price", "privacy",
+    "process", "product", "professional", "profile", "program",
+    "project", "public", "push",
+    "quality", "question", "quick",
+    "range", "rate", "reach", "read", "ready", "real", "recent",
+    "related", "release", "remote", "report", "require", "research",
+    "resource", "result", "review", "right", "role", "round", "rule",
+    "safe", "sale", "sales", "same", "save", "scale", "schedule",
+    "school", "search", "security", "senior", "series", "server",
+    "service", "share", "should", "show", "side", "sign", "simple",
+    "site", "skill", "small", "social", "software", "solution",
+    "some", "source", "south", "space", "special", "spotify",
+    "stack", "staff", "stage", "standard", "start", "state", "states",
+    "status", "stay", "step", "still", "stop", "store", "strong",
+    "student", "submit", "success", "such", "suite", "super", "support",
+    "sure", "system",
+    "take", "talk", "team", "tech", "technology", "term", "test",
+    "text", "than", "that", "their", "them", "then", "there", "these",
+    "they", "thing", "think", "this", "those", "through", "time",
+    "title", "today", "tool", "total", "track", "trade", "training",
+    "travel", "true", "turn", "type",
+    "under", "united", "university", "update", "upper", "used", "user",
+    "using",
+    "value", "very", "video", "view", "visit",
+    "want", "watch", "water", "week", "well", "west", "what", "when",
+    "where", "which", "while", "white", "whole", "wide", "will",
+    "windows", "with", "within", "without", "word", "work", "working",
+    "world", "would", "write",
+    "year", "york", "your",
+    # common non-person capitalized pairs from search snippets
+    "customer", "onsite", "hybrid", "junior", "overflow",
+}
+
+SKIP_EMAIL_DOMAINS = {
+    "example.com", "sentry.io", "wixpress.com", "github.com",
+    "gmail.com", "yahoo.com", "hotmail.com", "outlook.com",
+    "googlemail.com", "protonmail.com", "icloud.com", "aol.com",
+}
+
+SKIP_EMAIL_PREFIXES = {
+    "noreply", "no-reply", "support", "test", "demo", "spam",
+    "unsubscribe", "newsletter", "feedback", "abuse", "postmaster",
+    "webmaster", "admin", "root", "mailer-daemon", "donotreply",
+    "notifications", "alert", "info+", "bounces", "devnull",
 }
 
 from config import GOOGLE_API_KEYS, GOOGLE_CSE_ID
@@ -64,9 +135,22 @@ def _is_real_name(name: str) -> bool:
     parts = name.lower().split()
     if any(p in NON_NAME_WORDS for p in parts):
         return False
-    if any(len(p) < 2 for p in parts):
+    if any(len(p) < 3 for p in parts):
         return False
     if any(p == p.upper() for p in name.split()):
+        return False
+    return True
+
+
+def _is_valid_email(email: str) -> bool:
+    lower = email.lower()
+    local = lower.split("@")[0]
+    domain = lower.split("@")[-1]
+    if domain in SKIP_EMAIL_DOMAINS:
+        return False
+    if any(local.startswith(p) for p in SKIP_EMAIL_PREFIXES):
+        return False
+    if any(ext in lower for ext in [".png", ".jpg", ".gif", ".svg", ".css", ".js"]):
         return False
     return True
 
@@ -78,14 +162,7 @@ def _extract_contacts_from_text(text: str, source: str) -> list[dict]:
     name_matches = NAME_PATTERN.findall(text)
 
     for email in emails:
-        if any(skip in email.lower() for skip in [
-            "example.com", "sentry.io", "wixpress", "noreply",
-            "no-reply", "support@", "test@", "demo@", "spam",
-            "unsubscribe", "newsletter", "feedback@", "abuse@",
-            "postmaster@", "webmaster@", "admin@", "root@",
-            ".png", ".jpg", ".gif", "sentry", "github.com",
-            "gmail.com", "yahoo.com", "hotmail.com", "outlook.com",
-        ]):
+        if not _is_valid_email(email):
             continue
         contacts.append({
             "name": "",
@@ -94,34 +171,33 @@ def _extract_contacts_from_text(text: str, source: str) -> list[dict]:
             "source": source,
         })
 
-    for name in name_matches:
-        if not _is_real_name(name):
-            continue
-        title = title_matches[0] if title_matches else ""
-        contacts.append({
-            "name": name,
-            "title": title,
-            "email": "",
-            "source": source,
-        })
+    # Only extract names that appear near a title — otherwise they're garbage
+    if title_matches:
+        for name in name_matches:
+            if not _is_real_name(name):
+                continue
+            contacts.append({
+                "name": name,
+                "title": title_matches[0],
+                "email": "",
+                "source": source,
+            })
 
     return contacts
 
 
 async def _fetch_page_emails(client: httpx.AsyncClient, url: str) -> list[dict]:
-    """Fetch a URL and extract any email addresses from the full page text."""
     try:
         resp = await client.get(url, headers=_random_headers(), timeout=10)
         if resp.status_code != 200:
             return []
-        text = resp.text[:50000]  # Limit to first 50KB
+        text = resp.text[:50000]
         return _extract_contacts_from_text(text, f"page_scrape:{url[:60]}")
     except Exception:
         return []
 
 
 async def _search_google_api(client: httpx.AsyncClient, query: str) -> list[dict]:
-    """Use Google Custom Search JSON API, round-robin across all keys."""
     global _google_key_idx
     if not GOOGLE_API_KEYS or not GOOGLE_CSE_ID:
         return []
@@ -141,26 +217,20 @@ async def _search_google_api(client: httpx.AsyncClient, query: str) -> list[dict
                 for item in data.get("items", []):
                     text = f"{item.get('title', '')} {item.get('snippet', '')} {item.get('link', '')}"
                     contacts.extend(_extract_contacts_from_text(text, "google_api"))
-                # Fetch promising pages for deeper email extraction
                 promising_urls = []
                 for item in data.get("items", []):
                     link = item.get("link", "")
                     title = item.get("title", "").lower()
-                    if any(kw in link.lower() + " " + title for kw in ["team", "about", "contact", "people", "leadership", "founder", "management"]):
+                    if any(kw in link.lower() + " " + title for kw in ["team", "about", "contact", "people", "leadership", "founder"]):
                         promising_urls.append(link)
-                for url in promising_urls[:3]:
-                    try:
-                        page_contacts = await _fetch_page_emails(client, url)
-                        contacts.extend(page_contacts)
-                    except Exception:
-                        pass
+                for url in promising_urls[:2]:
+                    page_contacts = await _fetch_page_emails(client, url)
+                    contacts.extend(page_contacts)
                 return contacts
             if resp.status_code == 429:
-                logger.debug("Google key #%d rate limited, rotating", idx + 1)
                 continue
-            logger.debug("Google key #%d returned %d", idx + 1, resp.status_code)
-        except Exception as e:
-            logger.debug("Google key #%d failed: %s", idx + 1, e)
+        except Exception:
+            pass
     return []
 
 
@@ -174,39 +244,11 @@ async def _search_ddg(client: httpx.AsyncClient, query: str) -> list[dict]:
     if resp.status_code != 200:
         return []
     soup = BeautifulSoup(resp.text, "html.parser")
-
     contacts = []
     for result in soup.select(".result__snippet, .result__title, .result__body"):
         text = result.get_text(separator=" ", strip=True)
         contacts.extend(_extract_contacts_from_text(text, "duckduckgo"))
     return contacts
-
-
-async def _search_ddg_api(client: httpx.AsyncClient, query: str) -> list[dict]:
-    """Try DuckDuckGo instant answer API for additional results."""
-    try:
-        resp = await client.get(
-            "https://api.duckduckgo.com/",
-            params={"q": query, "format": "json", "no_html": "1", "skip_disambig": "1"},
-            headers=_random_headers(),
-            timeout=8,
-        )
-        if resp.status_code not in (200, 202):
-            return []
-        data = resp.json()
-        contacts = []
-        # Check abstract, answer, and related topics
-        for field in ["Abstract", "Answer"]:
-            text = data.get(field, "")
-            if text:
-                contacts.extend(_extract_contacts_from_text(text, "ddg_api"))
-        for topic in data.get("RelatedTopics", []):
-            text = topic.get("Text", "")
-            if text:
-                contacts.extend(_extract_contacts_from_text(text, "ddg_api"))
-        return contacts
-    except Exception:
-        return []
 
 
 async def _search_bing(client: httpx.AsyncClient, query: str) -> list[dict]:
@@ -219,7 +261,6 @@ async def _search_bing(client: httpx.AsyncClient, query: str) -> list[dict]:
     if resp.status_code != 200:
         return []
     soup = BeautifulSoup(resp.text, "html.parser")
-
     contacts = []
     for result in soup.select(".b_algo"):
         text = result.get_text(separator=" ", strip=True)
@@ -228,24 +269,19 @@ async def _search_bing(client: httpx.AsyncClient, query: str) -> list[dict]:
 
 
 async def _search_all_engines(client: httpx.AsyncClient, query: str) -> list[dict]:
-    """Try DDG, DDG API, and Bing concurrently."""
     results = await asyncio.gather(
         _search_ddg(client, query),
-        _search_ddg_api(client, query),
         _search_bing(client, query),
         return_exceptions=True,
     )
-
     all_results = []
     for r in results:
         if isinstance(r, list):
             all_results.extend(r)
-
     return all_results
 
 
 async def _run_query(client: httpx.AsyncClient, query: str, use_google_api: bool, query_idx: int) -> list[dict]:
-    """Run a single search query across all engines."""
     results = []
     if use_google_api and query_idx < 3:
         google_results = await _search_google_api(client, query)
@@ -255,38 +291,28 @@ async def _run_query(client: httpx.AsyncClient, query: str, use_google_api: bool
     return results
 
 
-_QUERY_BATCH_SIZE = 4
-
-
 async def search_contacts(company_name: str, domain: str) -> list[dict]:
     queries = [
-        f'"{company_name}" HR email hiring manager',
-        f'"{company_name}" CTO OR CEO email contact',
-        f'site:linkedin.com/in "{company_name}" CTO OR "head of engineering"',
-        f'"{company_name}" careers team email',
-        f'"{company_name}" engineering manager email',
-        f'"{company_name}" "people operations" OR "talent acquisition" email',
+        f'"{company_name}" HR email hiring',
+        f'"{company_name}" CTO OR CEO email',
+        f'"{company_name}" careers OR talent email',
     ]
     if domain:
-        queries.insert(2, f'"@{domain}" hiring OR HR OR recruiter')
+        queries.append(f'"@{domain}" hiring OR HR OR recruiter')
+        queries.append(f'site:{domain} "@{domain}" team OR about OR contact')
 
     all_contacts = []
     use_google_api = bool(GOOGLE_API_KEYS) and bool(GOOGLE_CSE_ID)
 
     try:
         async with httpx.AsyncClient(follow_redirects=True) as client:
-            for batch_start in range(0, len(queries), _QUERY_BATCH_SIZE):
-                batch = queries[batch_start:batch_start + _QUERY_BATCH_SIZE]
-                batch_results = await asyncio.gather(
-                    *[_run_query(client, q, use_google_api, batch_start + i)
-                      for i, q in enumerate(batch)],
-                    return_exceptions=True,
-                )
-                for r in batch_results:
-                    if isinstance(r, list):
-                        all_contacts.extend(r)
-                if batch_start + _QUERY_BATCH_SIZE < len(queries):
-                    await asyncio.sleep(random.uniform(0.5, 1.5))
+            batch_results = await asyncio.gather(
+                *[_run_query(client, q, use_google_api, i) for i, q in enumerate(queries)],
+                return_exceptions=True,
+            )
+            for r in batch_results:
+                if isinstance(r, list):
+                    all_contacts.extend(r)
     except Exception:
         logger.warning("Contact search completely failed for %s", company_name)
         return []

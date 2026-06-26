@@ -344,33 +344,29 @@ class GreenhouseScraper(BaseScraper):
     rate_limit = 1.0
 
     COMPANIES = {
-        "gitlab": "GitLab",
-        "figma": "Figma",
-        "twitch": "Twitch",
-        "canonical": "Canonical",
-        "stripe": "Stripe",
-        "vercel": "Vercel",
-        "discord": "Discord",
-        "datadog": "Datadog",
-        "grafanalabs": "Grafana Labs",
-        "elastic": "Elastic",
-        "netlify": "Netlify",
-        "circleci": "CircleCI",
-        "mongodb": "MongoDB",
-        "cockroachlabs": "CockroachDB",
-        "transfergo": "TransferGo",
-        "contentful": "Contentful",
-        "postman": "Postman",
-        "airtable": "Airtable",
-        "cloudflare": "Cloudflare",
-        "anthropic": "Anthropic",
-        "planetscale": "PlanetScale",
-        "cultureamp": "Culture Amp",
+        "canonical": ("Canonical", "canonical.com"),
+        "vercel": ("Vercel", "vercel.com"),
+        "grafanalabs": ("Grafana Labs", "grafana.com"),
+        "netlify": ("Netlify", "netlify.com"),
+        "circleci": ("CircleCI", "circleci.com"),
+        "cockroachlabs": ("CockroachDB", "cockroachlabs.com"),
+        "transfergo": ("TransferGo", "transfergo.com"),
+        "contentful": ("Contentful", "contentful.com"),
+        "postman": ("Postman", "postman.com"),
+        "airtable": ("Airtable", "airtable.com"),
+        "planetscale": ("PlanetScale", "planetscale.com"),
+        "cultureamp": ("Culture Amp", "cultureamp.com"),
+        "dbtlabs": ("dbt Labs", "getdbt.com"),
+        "lattice": ("Lattice", "lattice.com"),
+        "gusto": ("Gusto", "gusto.com"),
+        "loom": ("Loom", "loom.com"),
+        "webflow": ("Webflow", "webflow.com"),
+        "retool": ("Retool", "retool.com"),
     }
 
     async def _scrape_impl(self) -> list[dict]:
         jobs = []
-        for slug, company_name in self.COMPANIES.items():
+        for slug, (company_name, domain) in self.COMPANIES.items():
             try:
                 resp = await self.client.get(
                     f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true",
@@ -409,7 +405,7 @@ class GreenhouseScraper(BaseScraper):
                         url=item.get("absolute_url", ""),
                         title=item.get("title", ""),
                         company_name=company_name,
-                        company_url=f"https://boards.greenhouse.io/{slug}",
+                        company_url=f"https://{domain}",
                         description=desc,
                         tags=tags,
                         posted_at=str(published) if published else "",
@@ -425,14 +421,13 @@ class LeverScraper(BaseScraper):
     rate_limit = 1.0
 
     COMPANIES = {
-        "sonarsource": "SonarSource",
-        "spotify": "Spotify",
-        "toptal": "Toptal",
+        "sonarsource": ("SonarSource", "sonarsource.com"),
+        "toptal": ("Toptal", "toptal.com"),
     }
 
     async def _scrape_impl(self) -> list[dict]:
         jobs = []
-        for slug, company_name in self.COMPANIES.items():
+        for slug, (company_name, domain) in self.COMPANIES.items():
             try:
                 resp = await self.client.get(
                     f"https://api.lever.co/v0/postings/{slug}",
@@ -461,7 +456,7 @@ class LeverScraper(BaseScraper):
                         url=item.get("hostedUrl", ""),
                         title=item.get("text", ""),
                         company_name=company_name,
-                        company_url=f"https://jobs.lever.co/{slug}",
+                        company_url=f"https://{domain}",
                         description=desc[:2000],
                         tags=[cats.get("department", ""), cats.get("team", "")],
                         posted_at=str(created) if created else "",
@@ -477,27 +472,22 @@ class AshbyScraper(BaseScraper):
     rate_limit = 1.0
 
     COMPANIES = {
-        "openai": "OpenAI",
-        "notion": "Notion",
-        "ramp": "Ramp",
-        "linear": "Linear",
-        "supabase": "Supabase",
-        "airwallex": "Airwallex",
-        "plaid": "Plaid",
-        "snowflake": "Snowflake",
-        "vanta": "Vanta",
-        "clickup": "ClickUp",
-        "temporal": "Temporal",
-        "confluent": "Confluent",
-        "amplitude": "Amplitude",
-        "benchling": "Benchling",
-        "render": "Render",
-        "nerdwallet": "NerdWallet",
+        "notion": ("Notion", "notion.so"),
+        "ramp": ("Ramp", "ramp.com"),
+        "linear": ("Linear", "linear.app"),
+        "supabase": ("Supabase", "supabase.com"),
+        "vanta": ("Vanta", "vanta.com"),
+        "temporal": ("Temporal", "temporal.io"),
+        "amplitude": ("Amplitude", "amplitude.com"),
+        "benchling": ("Benchling", "benchling.com"),
+        "render": ("Render", "render.com"),
+        "fly": ("Fly.io", "fly.io"),
+        "stytch": ("Stytch", "stytch.com"),
     }
 
     async def _scrape_impl(self) -> list[dict]:
         jobs = []
-        for slug, company_name in self.COMPANIES.items():
+        for slug, (company_name, domain) in self.COMPANIES.items():
             try:
                 resp = await self.client.get(
                     f"https://api.ashbyhq.com/posting-api/job-board/{slug}",
@@ -527,7 +517,7 @@ class AshbyScraper(BaseScraper):
                         url=item.get("jobUrl", ""),
                         title=item.get("title", ""),
                         company_name=company_name,
-                        company_url=f"https://jobs.ashbyhq.com/{slug}",
+                        company_url=f"https://{domain}",
                         description=desc[:2000],
                         tags=tags,
                         posted_at=published,

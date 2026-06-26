@@ -27,6 +27,7 @@ def _build_report_text(stats: dict, sent_results: list[dict],
         f"  Emails attempted:              {stats.get('emails_attempted', 0)}",
         f"  Emails sent successfully:      {stats.get('emails_sent', 0)}",
         f"  Emails failed:                 {stats.get('emails_failed', 0)}",
+        f"  Emails skipped (bounced):      {stats.get('emails_skipped', 0)}",
         "",
     ]
 
@@ -46,22 +47,38 @@ def _build_report_text(stats: dict, sent_results: list[dict],
             lines.append(f"  {account:30s} {count:5d}")
         lines.append("")
 
+    if applications:
+        lines.append(f"COMPANIES HIRING — EMAILS QUEUED ({len(applications)})")
+        lines.append("-" * 60)
+        for i, app in enumerate(applications[:80], 1):
+            company = app.get("company_name", "?")
+            title = app.get("title", "?")
+            email = app.get("contact_email", "?")
+            tags = ", ".join(app.get("tags", [])[:3])
+            loc = app.get("location", "") or "Remote"
+            lines.append(f"  {i:3d}. {company} — {title}")
+            lines.append(f"       Email: {email} | Location: {loc}")
+            if tags:
+                lines.append(f"       Tech: {tags}")
+        if len(applications) > 80:
+            lines.append(f"\n  ... and {len(applications) - 80} more (see Excel)")
+        lines.append("")
+
     sent_ok = [r for r in sent_results if r.get("status") == "sent"]
     if sent_ok:
-        lines.append(f"APPLICATIONS SENT ({len(sent_ok)})")
+        lines.append(f"EMAILS SENT ({len(sent_ok)})")
         lines.append("-" * 40)
         for i, r in enumerate(sent_ok[:50], 1):
-            company = r.get("company_name", "Unknown")
-            role = r.get("role_title", "Unknown")
-            email = r.get("email", "Unknown")
-            lines.append(f"  {i:3d}. {company} — {role} → {email}")
+            company = r.get("company_name", "?")
+            email = r.get("email", "?")
+            lines.append(f"  {i:3d}. {company} → {email}")
         if len(sent_ok) > 50:
             lines.append(f"  ... and {len(sent_ok) - 50} more (see Excel)")
         lines.append("")
 
     failed = [r for r in sent_results if r.get("status") == "failed"]
     if failed:
-        lines.append(f"FAILED SENDS ({len(failed)})")
+        lines.append(f"FAILED ({len(failed)})")
         lines.append("-" * 40)
         for r in failed[:20]:
             lines.append(f"  {r.get('email', '?')} — {r.get('error', 'unknown')}")
@@ -83,45 +100,37 @@ def _build_excel(applications: list[dict], sent_results: list[dict],
                  all_scraped_jobs: list[dict] | None = None) -> bytes:
     wb = Workbook()
 
-    # Sheet 1: Sent Applications
+    # Sheet 1: Applications
     ws = wb.active
-    ws.title = "Sent Applications"
-    headers = ["#", "Company", "Role", "Contact Email", "Contact Name",
-               "Contact Title", "Location", "Source", "Job URL", "Status",
-               "SMTP Account", "Email Template"]
+    ws.title = "Applications"
+    headers = ["#", "Company", "Job Title", "Contact Email", "Contact Name",
+               "Confidence", "Status", "Location", "Job URL", "Tags"]
     ws.append(headers)
 
     result_map = {r.get("email", ""): r for r in sent_results}
-    sent_count = 0
-    fail_count = 0
     for i, app in enumerate(applications, 1):
         result = result_map.get(app.get("contact_email", ""), {})
-        status = result.get("status", "unknown")
-        if status == "sent":
-            sent_count += 1
-        elif status == "failed":
-            fail_count += 1
+        status = result.get("status", "pending")
+        tags = ", ".join(app.get("tags", [])[:5])
         ws.append([
             i,
             app.get("company_name", ""),
             app.get("title", ""),
             app.get("contact_email", ""),
-            app.get("contact_name", ""),
-            app.get("contact_title", ""),
-            app.get("location", ""),
-            app.get("source", ""),
-            app.get("url", ""),
+            app.get("contact_name", "") or app.get("contact_title", ""),
+            round(app.get("contact_confidence", 0), 2),
             status,
-            result.get("via", ""),
-            result.get("template", ""),
+            app.get("location", "") or "Remote",
+            app.get("url", ""),
+            tags,
         ])
     _auto_width(ws)
 
-    # Sheet 2: All Scraped Jobs (daily table)
+    # Sheet 2: All Jobs (for manual review)
     if all_scraped_jobs:
-        ws2 = wb.create_sheet("All Scraped Jobs")
-        ws2.append(["#", "Source", "Company", "Title", "Location",
-                     "Tags", "Salary", "URL", "Posted"])
+        ws2 = wb.create_sheet("All Jobs")
+        ws2.append(["#", "Company", "Job Title", "Location", "Tags",
+                     "Salary", "Apply URL", "Source", "Posted"])
         for i, job in enumerate(all_scraped_jobs[:2000], 1):
             salary = ""
             if job.get("salary_min") and job.get("salary_max"):
@@ -130,14 +139,14 @@ def _build_excel(applications: list[dict], sent_results: list[dict],
                 salary = f"${job['salary_min']:,}+"
             ws2.append([
                 i,
-                job.get("source", ""),
                 job.get("company_name", ""),
                 job.get("title", ""),
-                job.get("location", ""),
+                job.get("location", "") or "Remote",
                 ", ".join(job.get("tags", [])[:5]),
                 salary,
                 job.get("url", ""),
-                job.get("posted_at", "")[:10],
+                job.get("source", ""),
+                str(job.get("posted_at", ""))[:10],
             ])
         _auto_width(ws2)
 
@@ -166,15 +175,29 @@ def send_daily_report(stats: dict, sent_results: list[dict],
     today = datetime.now(IST).strftime("%Y-%m-%d")
     sent_n = stats.get("emails_sent", 0)
     fail_n = stats.get("emails_failed", 0)
-    subject = f"Auto-Apply Report — {today} | {sent_n} sent, {fail_n} failed"
+    scraped_n = stats.get("total_scraped", 0)
+    subject = f"Auto-Apply Report — {today} | {sent_n} sent, {fail_n} failed, {scraped_n} scraped"
 
     body = _build_report_text(stats, sent_results, applications)
-    excel_bytes = _build_excel(applications, sent_results, all_scraped_jobs)
+
+    try:
+        excel_bytes = _build_excel(applications, sent_results, all_scraped_jobs)
+    except Exception as e:
+        logger.error("Failed to build Excel report: %s", e)
+        excel_bytes = None
 
     logger.info("Sending daily report...")
-    send_report_email(
-        subject=subject,
-        body=body,
-        attachment_bytes=excel_bytes,
-        attachment_name=f"auto_apply_report_{today}.xlsx",
-    )
+    try:
+        send_report_email(
+            subject=subject,
+            body=body,
+            attachment_bytes=excel_bytes,
+            attachment_name=f"auto_apply_report_{today}.xlsx",
+        )
+    except Exception as e:
+        logger.error("Failed to send report email: %s", e)
+        # Try sending without attachment as fallback
+        try:
+            send_report_email(subject=subject, body=body)
+        except Exception as e2:
+            logger.error("Fallback report also failed: %s", e2)

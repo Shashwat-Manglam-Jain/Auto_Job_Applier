@@ -345,8 +345,8 @@ def match_role_with_ai(job: dict) -> tuple[str, float] | None:
         key = GROQ_API_KEYS[idx]
         last = _groq_last_calls.get(idx, 0.0)
         elapsed = time.time() - last
-        if elapsed < 2.5:
-            time.sleep(2.5 - elapsed)
+        if elapsed < 1.0:
+            time.sleep(1.0 - elapsed)
         _groq_last_calls[idx] = time.time()
         try:
             resp = httpx.post(

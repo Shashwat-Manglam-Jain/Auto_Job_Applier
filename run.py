@@ -20,9 +20,9 @@ from config import (
     INELIGIBLE_KEYWORDS, TARGET_COUNTRIES, TECH_KEYWORDS, MODE,
 )
 from matcher import match_role, smart_match_role, is_tech_job
-from scorer import score_company
-from customizer import generate_custom_resume
-from sender import compose_email, send_email, _get_next_account, _reset_counts
+from scorer import score_company, is_big_company
+from customizer import generate_custom_resume, _extract_job_techs, _format_tech
+from sender import compose_email, send_email, send_manual_email, _get_next_account, _reset_counts
 from reporter import send_daily_report
 from contacts.finder import find_contacts
 from resume_templates import get_template
@@ -35,6 +35,8 @@ logging.basicConfig(
 logger = logging.getLogger("pipeline")
 
 IST = timezone(timedelta(hours=5, minutes=30))
+
+MAX_EMAILS_PER_COMPANY = 2
 
 
 def _get_all_scrapers():
@@ -92,19 +94,21 @@ def _dedup_jobs(jobs: list[dict]) -> list[dict]:
 
 def _dedup_applications(applications: list[dict]) -> list[dict]:
     seen_emails = set()
-    seen_company_role = set()
+    company_counts = {}
     unique = []
     for app in applications:
         email = app.get("contact_email", "").lower().strip()
-        company_role = (
-            app.get("company_name", "").lower().strip(),
-            app.get("role_key", "").lower().strip(),
-            email,
-        )
-        if email and email not in seen_emails and company_role not in seen_company_role:
-            seen_emails.add(email)
-            seen_company_role.add(company_role)
-            unique.append(app)
+        if not email or email in seen_emails:
+            continue
+
+        company_key = app.get("company_name", "").lower().strip()
+        count = company_counts.get(company_key, 0)
+        if count >= MAX_EMAILS_PER_COMPANY:
+            continue
+
+        seen_emails.add(email)
+        company_counts[company_key] = count + 1
+        unique.append(app)
     return unique
 
 
@@ -123,30 +127,54 @@ def _get_role_title(role_key: str) -> str:
     return role_key.replace("_", " ").title() if role_key else "Software Engineer"
 
 
+_SCRAPER_TIMEOUT = 120
+
 async def _scrape_all(scrapers) -> tuple[list[dict], dict]:
     all_jobs = []
     per_source = {}
 
-    for scraper in scrapers:
+    async def _run_one(scraper):
         try:
-            logger.info("Scraping %s...", scraper.name)
-            jobs = await scraper.scrape()
-            all_jobs.extend(jobs)
-            per_source[scraper.name] = len(jobs)
-            logger.info("  %s: %d jobs found", scraper.name, len(jobs))
+            jobs = await asyncio.wait_for(scraper.scrape(), timeout=_SCRAPER_TIMEOUT)
+            return scraper.name, jobs
+        except asyncio.TimeoutError:
+            logger.warning("  %s timed out after %ds", scraper.name, _SCRAPER_TIMEOUT)
+            return scraper.name, []
         except Exception as e:
             logger.error("  %s failed: %s", scraper.name, e)
-            per_source[scraper.name] = 0
+            return scraper.name, []
+
+    results = await asyncio.gather(*[_run_one(s) for s in scrapers])
+    for name, jobs in results:
+        all_jobs.extend(jobs)
+        per_source[name] = len(jobs)
+        if jobs:
+            logger.info("  %s: %d jobs", name, len(jobs))
 
     return all_jobs, per_source
 
 
+_PIPELINE_MAX_SECONDS = 6600  # 110 min (buffer before GitHub 2h limit)
+_SCRAPE_BUDGET = 0.15         # 15% for scraping
+_CONTACT_BUDGET = 0.55        # 55% for contact discovery
+_SEND_BUDGET = 0.30           # 30% for sending emails
+
+
+def _time_left(start_time: float) -> float:
+    import time
+    return max(0, _PIPELINE_MAX_SECONDS - (time.time() - start_time))
+
+
 async def run_pipeline():
+    import time as _time
+    pipeline_start = _time.time()
+
     logger.info("=" * 60)
     logger.info("Starting Auto-Apply Pipeline — %s",
                 datetime.now(IST).strftime("%Y-%m-%d %H:%M IST"))
-    logger.info("Mode: %s | Email cap: %d | SMTP accounts: %d",
-                MODE.upper(), DAILY_EMAIL_CAP, len(SMTP_ACCOUNTS))
+    logger.info("Mode: %s | Email cap: %d | SMTP accounts: %d | Time budget: %dmin",
+                MODE.upper(), DAILY_EMAIL_CAP, len(SMTP_ACCOUNTS),
+                _PIPELINE_MAX_SECONDS // 60)
     logger.info("=" * 60)
 
     if not SMTP_ACCOUNTS:
@@ -154,211 +182,274 @@ async def run_pipeline():
         return
 
     _reset_counts()
-    stats = {}
-
-    # Step 1: Scrape
-    logger.info("\n[Step 1/7] Scraping all platforms...")
-    scrapers = _get_all_scrapers()
-    logger.info("Loaded %d scrapers", len(scrapers))
-    all_jobs, per_source = await _scrape_all(scrapers)
-    stats["total_scraped"] = len(all_jobs)
-    stats["per_source"] = per_source
-    logger.info("Total jobs scraped: %d", len(all_jobs))
-
-    if not all_jobs:
-        logger.warning("No jobs scraped. Check internet connection and scraper configs.")
-        stats.update({"today_jobs": 0, "filtered_jobs": 0, "unique_jobs": 0,
-                      "matched_jobs": 0, "contacts_found": 0,
-                      "emails_attempted": 0, "emails_sent": 0, "emails_failed": 0})
-        send_daily_report(stats, [], [], [])
-        return
-
-    # Step 2: Filter
-    logger.info("\n[Step 2/7] Filtering for tech + remote + target countries...")
-    filtered = []
-    for job in all_jobs:
-        title = job.get("title", "").strip()
-        company = job.get("company_name", "").strip()
-        if not title or not company:
-            continue
-        if title.lower().startswith("list ") or len(title) < 5:
-            continue
-        if not is_tech_job(title, job.get("tags", [])):
-            continue
-        if not _is_eligible(job):
-            continue
-        filtered.append(job)
-    stats["today_jobs"] = len(all_jobs)
-    stats["filtered_jobs"] = len(filtered)
-    logger.info("After filtering: %d jobs", len(filtered))
-
-    # Step 3: Dedup
-    logger.info("\n[Step 3/7] Deduplicating...")
-    unique_jobs = _dedup_jobs(filtered)
-    stats["unique_jobs"] = len(unique_jobs)
-    logger.info("After dedup: %d unique jobs", len(unique_jobs))
-
-    # Step 4: Match roles
-    logger.info("\n[Step 4/7] Matching to resume templates...")
-    for job in unique_jobs:
-        role_key, confidence = smart_match_role(job)
-        job["role_key"] = role_key
-        job["match_confidence"] = confidence
-    matched = [j for j in unique_jobs if j.get("role_key") and
-               j["match_confidence"] >= MIN_MATCH_CONFIDENCE]
-    stats["matched_jobs"] = len(matched)
-    logger.info("Matched to templates: %d jobs", len(matched))
-
-    # Step 5: Score and sort
-    logger.info("\n[Step 5/7] Scoring companies...")
-    for job in matched:
-        job["company_score"] = score_company(job)
-    matched.sort(key=lambda j: j["company_score"], reverse=True)
-
-    # Step 6: Find contacts and build application list
-    logger.info("\n[Step 6/7] Discovering contacts...")
+    stats = {
+        "total_scraped": 0, "today_jobs": 0, "filtered_jobs": 0,
+        "unique_jobs": 0, "matched_jobs": 0, "contacts_found": 0,
+        "emails_attempted": 0, "emails_sent": 0, "emails_failed": 0,
+        "per_source": {}, "per_account": {},
+    }
+    all_jobs = []
     applications = []
-    companies_processed = set()
-
-    unique_company_jobs = []
-    for job in matched:
-        company_key = job.get("company_name", "").lower().strip()
-        if company_key not in companies_processed:
-            companies_processed.add(company_key)
-            unique_company_jobs.append(job)
-
-    _CONTACT_BATCH = 5
-
-    async def _find_for_job(job):
-        try:
-            contacts = await find_contacts(
-                job.get("company_name", ""),
-                job.get("company_url", ""),
-            )
-            results = []
-            for contact in contacts:
-                if contact.get("confidence", 0) >= MIN_EMAIL_CONFIDENCE:
-                    results.append({
-                        **job,
-                        "contact_email": contact["email"],
-                        "contact_name": contact.get("name", ""),
-                        "contact_title": contact.get("title", ""),
-                        "contact_confidence": contact["confidence"],
-                    })
-            return results
-        except Exception as e:
-            logger.warning("Contact discovery failed for %s: %s",
-                          job.get("company_name", "?"), e)
-            return []
-
-    for batch_start in range(0, len(unique_company_jobs), _CONTACT_BATCH):
-        if len(applications) >= DAILY_EMAIL_CAP:
-            break
-        batch = unique_company_jobs[batch_start:batch_start + _CONTACT_BATCH]
-        batch_results = await asyncio.gather(*[_find_for_job(j) for j in batch])
-        for result_list in batch_results:
-            applications.extend(result_list)
-
-    applications = _dedup_applications(applications)
-    applications = applications[:DAILY_EMAIL_CAP]
-    stats["contacts_found"] = len(applications)
-    logger.info("Total applications to send: %d", len(applications))
-
-    # Step 7: Send emails
-    logger.info("\n[Step 7/7] Sending emails...")
     sent_results = []
+    report_sent = False
 
-    for i, app in enumerate(applications):
-        smtp_account = _get_next_account(i)
-        if not smtp_account:
-            logger.warning("All SMTP accounts reached daily cap at email %d", i)
-            break
+    try:
+        # Step 1: Scrape (budget: 15%)
+        scrape_deadline = pipeline_start + _PIPELINE_MAX_SECONDS * _SCRAPE_BUDGET
+        logger.info("\n[Step 1/7] Scraping all platforms (budget: %dmin)...",
+                    int(_PIPELINE_MAX_SECONDS * _SCRAPE_BUDGET / 60))
+        scrapers = _get_all_scrapers()
+        logger.info("Loaded %d scrapers", len(scrapers))
+        all_jobs, per_source = await _scrape_all(scrapers)
+        stats["total_scraped"] = len(all_jobs)
+        stats["per_source"] = per_source
+        logger.info("Total jobs scraped: %d (%.0fs elapsed)",
+                    len(all_jobs), _time.time() - pipeline_start)
 
-        role_key = app.get("role_key", "software_engineer")
-        role_title = _get_role_title(role_key)
-        top_skills = _get_top_skills(role_key)
-        company_name = app.get("company_name", "")
-        hr_name = app.get("contact_name", "")
+        if not all_jobs:
+            logger.warning("No jobs scraped.")
+            return
 
-        job_text = f"{app.get('title', '')} {app.get('description', '')[:200]}".lower()
-        if any(kw in job_text for kw in ("freelance", "contract", "contractor", "part-time", "part time")):
-            template_key = "freelance"
-        elif app.get("url"):
-            template_key = "job_apply"
-        else:
-            template_key = "cold_outreach"
-        subject, body = compose_email(
-            hr_name=hr_name,
-            company_name=company_name,
-            role_title=role_title,
-            top_skills=top_skills,
-            template_key=template_key,
-        )
+        # Step 2: Filter + Dedup + Match + Score (fast, <10s)
+        logger.info("\n[Step 2/7] Filter → Dedup → Match → Score...")
+        filtered = []
+        big_skipped = 0
+        for job in all_jobs:
+            title = job.get("title", "").strip()
+            company = job.get("company_name", "").strip()
+            if not title or not company:
+                continue
+            if title.lower().startswith("list ") or len(title) < 5:
+                continue
+            if is_big_company(company):
+                big_skipped += 1
+                continue
+            if not is_tech_job(title, job.get("tags", [])):
+                continue
+            if not _is_eligible(job):
+                continue
+            filtered.append(job)
 
+        unique_jobs = _dedup_jobs(filtered)
+
+        for job in unique_jobs:
+            role_key, confidence = smart_match_role(job)
+            job["role_key"] = role_key
+            job["match_confidence"] = confidence
+        matched = [j for j in unique_jobs if j.get("role_key") and
+                   j["match_confidence"] >= MIN_MATCH_CONFIDENCE]
+        for job in matched:
+            job["company_score"] = score_company(job)
+        matched.sort(key=lambda j: j["company_score"], reverse=True)
+
+        stats["today_jobs"] = len(all_jobs)
+        stats["filtered_jobs"] = len(filtered)
+        stats["unique_jobs"] = len(unique_jobs)
+        stats["matched_jobs"] = len(matched)
+        logger.info("Filtered: %d | Unique: %d | Matched: %d | Big co skipped: %d",
+                    len(filtered), len(unique_jobs), len(matched), big_skipped)
+
+        # Step 3: Find contacts (budget: 55%)
+        contact_deadline = pipeline_start + _PIPELINE_MAX_SECONDS * (_SCRAPE_BUDGET + _CONTACT_BUDGET)
+        logger.info("\n[Step 3/7] Discovering contacts (budget: %dmin)...",
+                    int(_PIPELINE_MAX_SECONDS * _CONTACT_BUDGET / 60))
+
+        companies_processed = set()
+        unique_company_jobs = []
+        for job in matched:
+            company_key = job.get("company_name", "").lower().strip()
+            if company_key not in companies_processed:
+                companies_processed.add(company_key)
+                unique_company_jobs.append(job)
+
+        _CONTACT_BATCH = 8
+
+        async def _find_for_job(job):
+            try:
+                contacts = await find_contacts(
+                    job.get("company_name", ""),
+                    job.get("company_url", ""),
+                    job_description=job.get("description", ""),
+                )
+                results = []
+                for contact in contacts:
+                    if contact.get("confidence", 0) >= MIN_EMAIL_CONFIDENCE:
+                        results.append({
+                            **job,
+                            "contact_email": contact["email"],
+                            "contact_name": contact.get("name", ""),
+                            "contact_title": contact.get("title", ""),
+                            "contact_confidence": contact["confidence"],
+                        })
+                return results
+            except Exception as e:
+                logger.warning("Contact discovery failed for %s: %s",
+                              job.get("company_name", "?"), e)
+                return []
+
+        for batch_start in range(0, len(unique_company_jobs), _CONTACT_BATCH):
+            if len(applications) >= DAILY_EMAIL_CAP:
+                break
+            if _time.time() > contact_deadline:
+                logger.warning("Contact discovery time budget exceeded — moving to send phase")
+                break
+            batch = unique_company_jobs[batch_start:batch_start + _CONTACT_BATCH]
+            batch_results = await asyncio.gather(*[_find_for_job(j) for j in batch])
+            for result_list in batch_results:
+                applications.extend(result_list)
+
+        applications = _dedup_applications(applications)
+        applications.sort(key=lambda a: a.get("contact_confidence", 0), reverse=True)
+        applications = applications[:DAILY_EMAIL_CAP]
+        stats["contacts_found"] = len(applications)
+
+        logger.info("Applications ready: %d verified emails (%.0fs elapsed)",
+                    len(applications), _time.time() - pipeline_start)
+
+        # Step 4: Send report ONCE with all job/company data
+        logger.info("\n[Step 4/7] Sending report...")
         try:
-            pdf_bytes = generate_custom_resume(
-                role_key,
-                app.get("tags", []),
-                app.get("description", ""),
-                job_title=app.get("title", ""),
-                company_name=company_name,
-            )
+            send_daily_report(stats, [], applications, all_jobs)
+            report_sent = True
+            logger.info("Report sent!")
         except Exception as e:
-            logger.warning("Custom resume failed for %s, using template: %s", company_name, e)
-            from resume_templates import generate_pdf_resume
-            pdf_bytes = generate_pdf_resume(role_key, PROFILE)
+            logger.error("Failed to send report: %s", e)
 
-        name_slug = PROFILE.get("name", "Resume").replace(" ", "_")
-        role_slug = role_title.replace(" ", "_")
-        pdf_filename = f"{name_slug}_{role_slug}_Resume.pdf"
-
-        result = send_email(
-            to_email=app["contact_email"],
-            subject=subject,
-            body=body,
-            pdf_bytes=pdf_bytes,
-            pdf_filename=pdf_filename,
-            smtp_account=smtp_account,
-        )
-        result["company_name"] = company_name
-        result["role_title"] = role_title
-        sent_results.append(result)
-
-        if result["status"] == "sent":
-            logger.info("  [%d/%d] ✓ Sent to %s (%s) via %s",
-                       i + 1, len(applications), app["contact_email"],
-                       company_name, smtp_account["email"])
+        # Step 5: Send emails (budget: 30%)
+        if not applications:
+            logger.info("No applications to send.")
         else:
-            logger.warning("  [%d/%d] ✗ Failed %s: %s",
-                          i + 1, len(applications), app["contact_email"],
-                          result.get("error", ""))
+            send_deadline = pipeline_start + _PIPELINE_MAX_SECONDS
+            logger.info("\n[Step 5/7] Sending %d emails (budget: %dmin)...",
+                        len(applications),
+                        int(_PIPELINE_MAX_SECONDS * _SEND_BUDGET / 60))
+            consecutive_bounces = 0
+            MAX_CONSECUTIVE_BOUNCES = 5
 
-        delay = random.uniform(SEND_DELAY_MIN, SEND_DELAY_MAX)
-        await asyncio.sleep(delay)
+            for i, app in enumerate(applications):
+                if _time.time() > send_deadline - 60:
+                    logger.warning("Time budget almost up — stopping sends at %d/%d",
+                                   i, len(applications))
+                    break
 
-    # Stats
-    sent_ok = [r for r in sent_results if r["status"] == "sent"]
-    sent_fail = [r for r in sent_results if r["status"] == "failed"]
-    stats["emails_attempted"] = len(sent_results)
-    stats["emails_sent"] = len(sent_ok)
-    stats["emails_failed"] = len(sent_fail)
+                if consecutive_bounces >= MAX_CONSECUTIVE_BOUNCES:
+                    logger.warning("Stopping sends — %d consecutive bounces.", consecutive_bounces)
+                    break
 
-    per_account = {}
-    for r in sent_ok:
-        via = r.get("via", "unknown")
-        per_account[via] = per_account.get(via, 0) + 1
-    stats["per_account"] = per_account
+                smtp_account = _get_next_account(i)
+                if not smtp_account:
+                    logger.warning("All SMTP accounts reached daily cap at email %d", i)
+                    break
 
-    logger.info("\n" + "=" * 60)
-    logger.info("Pipeline Complete!")
-    logger.info("  Sent: %d | Failed: %d | Total scraped: %d",
-               len(sent_ok), len(sent_fail), stats["total_scraped"])
-    logger.info("=" * 60)
+                role_key = app.get("role_key", "software_engineer")
+                role_title = _get_role_title(role_key)
+                company_name = app.get("company_name", "")
+                hr_name = app.get("contact_name", "")
+                actual_job_title = app.get("title", "")
 
-    # Send report with full scraped jobs table
-    logger.info("\nSending daily report email...")
-    send_daily_report(stats, sent_results, applications, all_jobs)
-    logger.info("Done!")
+                job_techs = _extract_job_techs(
+                    app.get("description", ""), app.get("tags", [])
+                )
+                if job_techs:
+                    top_skills = ", ".join(_format_tech(t) for t in job_techs[:5])
+                else:
+                    top_skills = _get_top_skills(role_key)
+
+                job_text = f"{actual_job_title} {app.get('description', '')[:200]}".lower()
+                if any(kw in job_text for kw in ("freelance", "contract", "contractor", "part-time", "part time")):
+                    template_key = "freelance"
+                elif app.get("url"):
+                    template_key = "job_apply"
+                else:
+                    template_key = "cold_outreach"
+                subject, body = compose_email(
+                    hr_name=hr_name,
+                    company_name=company_name,
+                    role_title=role_title,
+                    top_skills=top_skills,
+                    template_key=template_key,
+                    job_title=actual_job_title,
+                )
+
+                try:
+                    pdf_bytes = generate_custom_resume(
+                        role_key,
+                        app.get("tags", []),
+                        app.get("description", ""),
+                        job_title=app.get("title", ""),
+                        company_name=company_name,
+                    )
+                except Exception as e:
+                    logger.warning("Custom resume failed for %s: %s", company_name, e)
+                    from resume_templates import generate_pdf_resume
+                    pdf_bytes = generate_pdf_resume(role_key, PROFILE)
+
+                name_slug = PROFILE.get("name", "Resume").replace(" ", "_")
+                role_slug = role_title.replace(" ", "_")
+                pdf_filename = f"{name_slug}_{role_slug}_Resume.pdf"
+
+                result = send_email(
+                    to_email=app["contact_email"],
+                    subject=subject,
+                    body=body,
+                    pdf_bytes=pdf_bytes,
+                    pdf_filename=pdf_filename,
+                    smtp_account=smtp_account,
+                    cc_emails=app.get("cc_emails"),
+                    validate=True,
+                )
+                result["company_name"] = company_name
+                result["role_title"] = role_title
+                sent_results.append(result)
+
+                if result["status"] == "sent":
+                    consecutive_bounces = 0
+                    logger.info("  [%d/%d] Sent to %s (%s) via %s",
+                               i + 1, len(applications), app["contact_email"],
+                               company_name, smtp_account["email"])
+                elif result["status"] == "skipped":
+                    logger.info("  [%d/%d] Skipped %s: %s",
+                               i + 1, len(applications), app["contact_email"],
+                               result.get("error", ""))
+                else:
+                    error = result.get("error", "").lower()
+                    if "does not exist" in error or "550" in error or "user unknown" in error:
+                        consecutive_bounces += 1
+                    else:
+                        consecutive_bounces = 0
+                    logger.warning("  [%d/%d] Failed %s: %s",
+                                  i + 1, len(applications), app["contact_email"],
+                                  result.get("error", ""))
+
+                if result["status"] != "skipped":
+                    delay = random.uniform(SEND_DELAY_MIN, SEND_DELAY_MAX)
+                    await asyncio.sleep(delay)
+
+    except Exception as e:
+        logger.error("Pipeline error: %s", e, exc_info=True)
+    finally:
+        import time as _time2
+        elapsed = _time2.time() - pipeline_start
+        sent_ok = [r for r in sent_results if r.get("status") == "sent"]
+        sent_fail = [r for r in sent_results if r.get("status") == "failed"]
+        sent_skip = [r for r in sent_results if r.get("status") == "skipped"]
+        stats["emails_attempted"] = len(sent_results)
+        stats["emails_sent"] = len(sent_ok)
+        stats["emails_failed"] = len(sent_fail)
+        stats["emails_skipped"] = len(sent_skip)
+
+        per_account = {}
+        for r in sent_ok:
+            via = r.get("via", "unknown")
+            per_account[via] = per_account.get(via, 0) + 1
+        stats["per_account"] = per_account
+
+        logger.info("\n" + "=" * 60)
+        logger.info("Pipeline Complete! (%.0fs / %dmin)", elapsed, int(elapsed / 60))
+        logger.info("  Sent: %d | Failed: %d | Skipped: %d | Scraped: %d",
+                   len(sent_ok), len(sent_fail), len(sent_skip),
+                   stats["total_scraped"])
+        logger.info("=" * 60)
 
 
 def _print_scrape_report(all_jobs: list[dict], per_source: dict,
@@ -424,8 +515,116 @@ async def run_scrape_report():
     return all_jobs, unique_jobs, matched
 
 
+def run_manual_send():
+    """Interactive manual email sender with full validation."""
+    from config import SMTP_ACCOUNTS
+
+    print(f"\n{'='*60}")
+    print("  MANUAL EMAIL SENDER")
+    print(f"{'='*60}")
+
+    if not SMTP_ACCOUNTS:
+        print("\n  ERROR: No SMTP accounts configured in .env")
+        print("  Set SMTP_ACCOUNT_1 and SMTP_PASSWORD_1")
+        return
+
+    print(f"\n  Available SMTP accounts:")
+    for i, acc in enumerate(SMTP_ACCOUNTS, 1):
+        print(f"    {i}. {acc['email']}")
+
+    if len(SMTP_ACCOUNTS) > 1:
+        choice = input(f"\n  Select account (1-{len(SMTP_ACCOUNTS)}) [1]: ").strip()
+        idx = int(choice) - 1 if choice.isdigit() and 1 <= int(choice) <= len(SMTP_ACCOUNTS) else 0
+    else:
+        idx = 0
+    smtp_account = SMTP_ACCOUNTS[idx]
+    print(f"  Using: {smtp_account['email']}")
+
+    to_email = input("\n  To: ").strip()
+    if not to_email:
+        print("  ERROR: To address is required")
+        return
+
+    cc_input = input("  CC (comma-separated, or empty): ").strip()
+    cc_emails = [c.strip() for c in cc_input.split(",") if c.strip()] if cc_input else []
+
+    subject = input("  Subject: ").strip()
+    if not subject:
+        print("  ERROR: Subject is required")
+        return
+
+    print("  Body (type your message, then enter a blank line to finish):")
+    body_lines = []
+    while True:
+        line = input("  ")
+        if line == "":
+            break
+        body_lines.append(line)
+    body = "\n".join(body_lines)
+
+    if not body:
+        print("  ERROR: Body is required")
+        return
+
+    attach_path = input("  Attachment path (or empty for none): ").strip()
+    attachment_bytes = None
+    attachment_filename = None
+    if attach_path:
+        try:
+            with open(attach_path, "rb") as f:
+                attachment_bytes = f.read()
+            attachment_filename = os.path.basename(attach_path)
+            print(f"  Attached: {attachment_filename} ({len(attachment_bytes)} bytes)")
+        except FileNotFoundError:
+            print(f"  WARNING: File not found: {attach_path} — sending without attachment")
+        except Exception as e:
+            print(f"  WARNING: Could not read file: {e} — sending without attachment")
+
+    print(f"\n{'='*60}")
+    print("  REVIEW")
+    print(f"{'='*60}")
+    print(f"  From:    {smtp_account['email']}")
+    print(f"  To:      {to_email}")
+    if cc_emails:
+        print(f"  CC:      {', '.join(cc_emails)}")
+    print(f"  Subject: {subject}")
+    print(f"  Body:    {body[:100]}{'...' if len(body) > 100 else ''}")
+    if attachment_filename:
+        print(f"  Attach:  {attachment_filename}")
+
+    confirm = input("\n  Send? (y/n) [n]: ").strip().lower()
+    if confirm != "y":
+        print("  Cancelled.")
+        return
+
+    result = send_manual_email(
+        to_email=to_email,
+        subject=subject,
+        body=body,
+        cc_emails=cc_emails,
+        attachment_bytes=attachment_bytes,
+        attachment_filename=attachment_filename,
+        smtp_account=smtp_account,
+    )
+
+    print(f"\n{'='*60}")
+    if result["status"] == "sent":
+        print(f"  Email sent successfully via {result['via']}")
+        if result.get("cc"):
+            print(f"  CC delivered to: {', '.join(result['cc'])}")
+        if result.get("skipped_cc"):
+            print(f"  CC skipped (invalid):")
+            for s in result["skipped_cc"]:
+                print(f"    - {s['email']}: {s['reason']}")
+    else:
+        print(f"  FAILED: {result.get('error', 'unknown error')}")
+    print(f"{'='*60}\n")
+
+
 if __name__ == "__main__":
     if "--report" in sys.argv:
         asyncio.run(run_scrape_report())
+    elif "--manual" in sys.argv:
+        run_manual_send()
     else:
         asyncio.run(run_pipeline())

@@ -21,11 +21,49 @@ TITLE_PATTERNS = re.compile(
 
 NAME_PATTERN = re.compile(r"\b([A-Z][a-z]+ [A-Z][a-z]+)\b")
 
+_NOT_PERSON_NAMES = {
+    "sequoia capital", "craft ventures", "index ventures", "greylock partners",
+    "andreessen horowitz", "benchmark capital", "general catalyst",
+    "kleiner perkins", "light speed", "accel partners", "tiger global",
+    "coatue management", "insight partners", "bessemer venture",
+    "first round", "union square", "battery ventures", "new enterprise",
+    "goldman sachs", "morgan stanley", "wells fargo", "merrill lynch",
+    "google cloud", "amazon web", "microsoft azure", "apple store",
+    "open source", "read more", "learn more", "click here",
+    "sign up", "log in", "get started", "terms conditions",
+    "privacy policy", "cookie policy", "customer support",
+    "united states", "new york", "san francisco", "los angeles",
+    "product hunt", "tech crunch", "series seed",
+    "nat friedman", "full stack", "front end", "back end",
+}
+
+def _is_likely_person_name(name: str) -> bool:
+    if name.lower() in _NOT_PERSON_NAMES:
+        return False
+    parts = name.split()
+    if len(parts) != 2:
+        return False
+    if any(len(p) < 2 for p in parts):
+        return False
+    biz_words = {"inc", "llc", "ltd", "corp", "group", "team", "labs",
+                 "studio", "partners", "ventures", "capital", "fund",
+                 "global", "cloud", "platform", "solutions", "systems",
+                 "technologies", "services", "software", "digital",
+                 "media", "design", "analytics", "network", "works"}
+    if any(p.lower() in biz_words for p in parts):
+        return False
+    title_words = {"founder", "cofounder", "ceo", "cto", "cfo", "coo",
+                   "director", "manager", "lead", "head", "chief",
+                   "president", "officer", "recruiter", "engineer",
+                   "developer", "designer", "analyst", "consultant"}
+    if any(p.lower() in title_words for p in parts):
+        return False
+    return True
+
 CONTACT_PATHS = [
-    "/about", "/about-us", "/team", "/people",
-    "/contact", "/contact-us",
-    "/careers", "/jobs", "/company", "/leadership",
-    "/our-team", "/management",
+    "", "/about", "/about-us", "/team", "/our-team", "/people",
+    "/contact", "/contact-us", "/careers", "/company",
+    "/leadership", "/founders",
 ]
 
 HEADERS = {
@@ -91,6 +129,8 @@ def _extract_social_links(soup: BeautifulSoup) -> list[dict]:
                 # Check if there's a title nearby
                 title_match = TITLE_PATTERNS.search(parent_text)
                 name_match = NAME_PATTERN.search(parent_text) or NAME_PATTERN.search(link_text)
+                if name_match and not _is_likely_person_name(name_match.group(0)):
+                    name_match = None
                 if name_match or title_match:
                     contacts.append({
                         "name": name_match.group(0) if name_match else "",
@@ -127,7 +167,7 @@ def _extract_contacts_from_html(soup: BeautifulSoup) -> list[dict]:
     for el in soup.find_all(attrs={"itemprop": "name"}):
         name_text = el.get("content", "") or el.get_text(strip=True)
         name_m = NAME_PATTERN.search(name_text)
-        if name_m:
+        if name_m and _is_likely_person_name(name_m.group(0)):
             # Look for a nearby jobTitle
             parent = el.parent
             title_el = parent.find(attrs={"itemprop": "jobTitle"}) if parent else None
@@ -157,6 +197,8 @@ def _extract_contacts_from_html(soup: BeautifulSoup) -> list[dict]:
         })
 
     for name in name_matches:
+        if not _is_likely_person_name(name):
+            continue
         nearby_text = ""
         for el in soup.find_all(string=re.compile(re.escape(name))):
             parent = el.parent
@@ -212,6 +254,11 @@ _ATS_HOSTS = {
     "api.ashbyhq.com", "jobs.ashbyhq.com",
     "jobs.workable.com", "apply.workable.com",
     "jobs.smartrecruiters.com", "jobs.jobvite.com",
+    "himalayas.app", "remoteok.com", "remotive.com", "weworkremotely.com",
+    "justremote.co", "nodesk.co", "dynamitejobs.com", "workingnomads.co",
+    "arbeitnow.com", "jobicy.com", "themuse.com", "wellfound.com",
+    "angel.co", "linkedin.com", "indeed.com", "glassdoor.com",
+    "dribbble.com", "larajobs.com", "vuejobs.com", "findwork.dev",
 }
 
 
@@ -257,7 +304,7 @@ async def scrape_company_contacts(company_url: str) -> list[dict]:
             followed = 0
             seen_urls = set()
             for link in team_member_links:
-                if followed >= 5:
+                if followed >= 2:
                     break
                 if link in seen_urls:
                     continue
