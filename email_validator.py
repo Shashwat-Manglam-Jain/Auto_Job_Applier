@@ -227,6 +227,55 @@ def disify_is_bad(data: dict | None) -> tuple[bool, str]:
     return False, "ok"
 
 
+# --- MX provider detection ---
+_UNRELIABLE_MX_KEYWORDS = {
+    "protection.outlook.com": "microsoft",
+    "olc.protection.outlook.com": "microsoft",
+    "mail.protection.outlook.com": "microsoft",
+    "improvmx.com": "improvmx",
+    "parkmail": "parked",
+    "dynadot": "parked",
+    "sedoparking": "parked",
+    "pendingrenew": "parked",
+    "registrar-servers": "parked",
+    "above.com": "parked",
+    "bodis.com": "parked",
+    "mimecast.com": "mimecast",
+    "pphosted.com": "proofpoint",
+    "ppe-hosted.com": "proofpoint",
+}
+
+_RELIABLE_MX_KEYWORDS = {
+    "aspmx.l.google.com": "google",
+    "googlemail.com": "google",
+    "google.com": "google",
+    "smtp.secureserver.net": "godaddy",
+    "zoho.com": "zoho",
+}
+
+
+def classify_mx_provider(mx_hosts: list[str]) -> tuple[str, bool]:
+    """Classify the MX provider and whether SMTP RCPT TO is reliable.
+    Returns (provider_name, is_reliable).
+    Google = reliable (rejects non-existent mailboxes at SMTP level).
+    Microsoft/ImprovMX/Parked/Mimecast = unreliable (accepts then bounces).
+    """
+    if not mx_hosts:
+        return "unknown", False
+
+    primary = mx_hosts[0].lower()
+
+    for keyword, provider in _RELIABLE_MX_KEYWORDS.items():
+        if keyword in primary:
+            return provider, True
+
+    for keyword, provider in _UNRELIABLE_MX_KEYWORDS.items():
+        if keyword in primary:
+            return provider, False
+
+    return "other", False
+
+
 # --- Layer 7: Catch-all detection ---
 def is_catchall_domain(domain: str, mx_hosts: list[str], timeout: int = 10) -> bool:
     if domain in _catchall_cache:
@@ -313,11 +362,11 @@ def verify_smtp_rcpt(email: str, mx_hosts: list[str], from_email: str = "",
                     _vrfy_cache[cache_key] = False
                     return False, f"rejected (550): {msg_str[:100]}"
                 elif code in (451, 452):
-                    return True, "greylisted (temporary, likely valid)"
+                    return False, "greylisted (temporary) — REJECTED for safety"
                 elif code == 421:
                     continue
                 else:
-                    return True, f"inconclusive (code {code}), assuming valid"
+                    return False, f"inconclusive (code {code}) — REJECTED for safety"
 
         except socket.timeout:
             logger.debug("SMTP timeout for %s via %s", email, mx_host)
@@ -332,7 +381,7 @@ def verify_smtp_rcpt(email: str, mx_hosts: list[str], from_email: str = "",
             logger.debug("SMTP error for %s via %s: %s", email, mx_host, e)
             continue
 
-    return True, "could not verify (all MX unreachable), assuming valid"
+    return False, "could not verify (all MX unreachable) — REJECTED for safety"
 
 
 # --- Full validation pipeline ---
