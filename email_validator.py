@@ -251,6 +251,11 @@ _RELIABLE_MX_KEYWORDS = {
     "google.com": "google",
     "smtp.secureserver.net": "godaddy",
     "zoho.com": "zoho",
+    "zoho.eu": "zoho",
+    "zoho.in": "zoho",
+    "mx.yandex.net": "yandex",
+    "emailsrvr.com": "rackspace",
+    "forwardemail.net": "forwardemail",
 }
 
 

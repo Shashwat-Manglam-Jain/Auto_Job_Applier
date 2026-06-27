@@ -155,9 +155,9 @@ async def _scrape_all(scrapers) -> tuple[list[dict], dict]:
 
 
 _PIPELINE_MAX_SECONDS = 6600  # 110 min (buffer before GitHub 2h limit)
-_SCRAPE_BUDGET = 0.15         # 15% for scraping
-_CONTACT_BUDGET = 0.55        # 55% for contact discovery
-_SEND_BUDGET = 0.30           # 30% for sending emails
+_SCRAPE_BUDGET = 0.12         # 12% for scraping
+_CONTACT_BUDGET = 0.68        # 68% for contact discovery (main bottleneck)
+_SEND_BUDGET = 0.20           # 20% for sending emails
 
 
 def _time_left(start_time: float) -> float:
@@ -262,7 +262,7 @@ async def run_pipeline():
                 companies_processed.add(company_key)
                 unique_company_jobs.append(job)
 
-        _CONTACT_BATCH = 8
+        _CONTACT_BATCH = 12
 
         async def _find_for_job(job):
             try:

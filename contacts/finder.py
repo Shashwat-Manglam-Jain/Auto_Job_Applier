@@ -322,13 +322,17 @@ async def _verify_email_fortress(email: str, company_domain: str,
     is_catchall = _is_catchall(email_domain)
 
     if is_catchall:
-        if any(local.startswith(p) for p in _JOB_EMAIL_PREFIXES):
-            logger.info("  CATCH-ALL REJECT %s: generic email on catch-all domain", email)
-            return False
-        if not is_from_source:
-            logger.info("  CATCH-ALL REJECT %s: guessed email on catch-all domain", email)
-            return False
-        logger.info("  CATCH-ALL WARN %s: domain accepts anything, trusting source", email)
+        # Catch-all domains NEVER bounce — they accept everything.
+        # Safe to send to: won't cause "address not found" errors.
+        if is_from_source:
+            logger.info("  CATCH-ALL OK %s: found email, catch-all won't bounce", email)
+            return True
+        # Guessed name-based emails on catch-all: allow (won't bounce)
+        if not any(local.startswith(p) for p in _JOB_EMAIL_PREFIXES):
+            logger.info("  CATCH-ALL OK %s: name-based guess, catch-all won't bounce", email)
+            return True
+        # Generic prefixes (careers@, hr@) on catch-all: also safe
+        logger.info("  CATCH-ALL OK %s: generic email, catch-all won't bounce", email)
         return True
 
     # Layer 8: SMTP RCPT TO verification
@@ -341,16 +345,17 @@ async def _verify_email_fortress(email: str, company_domain: str,
     # Unreliable provider (Microsoft, ImprovMX, Mimecast, parked, unknown)
     # SMTP RCPT TO will say "OK" but email may bounce later
     if not is_from_source:
-        # For guessed/generic emails on unreliable providers: REJECT
-        # This is the key fix — don't trust SMTP RCPT TO on these providers
         logger.info("  PROVIDER REJECT %s: guessed email on %s (unreliable SMTP)", email, provider)
         return False
 
-    # Email was found from a real source on unreliable provider
-    # Still run SMTP, but treat "unreachable" as rejection
-    if not _smtp_verify(email):
+    # Email found from real source on unreliable provider — trust the source.
+    # Port 25 is often blocked to non-Google MX servers, so SMTP will fail
+    # even for valid addresses. Since this email was actually found (search/
+    # scrape/job description), all other checks passed, accept it.
+    if provider == "parked":
+        logger.info("  PARKED REJECT %s: domain is parked (%s)", email, provider)
         return False
-
+    logger.info("  SOURCE-TRUSTED %s: found email on %s — accepting (all other checks passed)", email, provider)
     return True
 
 
@@ -420,10 +425,12 @@ async def find_contacts(company_name: str, company_url: str, job_description: st
     # Derive domain from company name if URL was a job board
     if not domain and company_name:
         slug = re.sub(r"[^a-z0-9]", "", company_name.lower())
-        candidate = f"{slug}.com"
-        if has_valid_mx(candidate):
-            domain = candidate
-            logger.info("[%s] Derived domain %s from company name", company_name, domain)
+        for tld in (".com", ".io", ".co", ".dev", ".tech", ".org", ".ai"):
+            candidate = f"{slug}{tld}"
+            if has_valid_mx(candidate):
+                domain = candidate
+                logger.info("[%s] Derived domain %s from company name", company_name, domain)
+                break
 
     if not domain:
         logger.info("[%s] No company domain found — skipping", company_name)
@@ -482,7 +489,7 @@ async def find_contacts(company_name: str, company_url: str, job_description: st
         c.setdefault("confidence", 0.6)
         all_with_email.append(c)
 
-    # Strategy 4: Name-based email guessing (only on non-catch-all)
+    # Strategy 4: Name-based email guessing
     names_without_email = []
     for c in search_results + scrape_results:
         if isinstance(c, dict) and c.get("name") and not c.get("email"):
@@ -499,13 +506,27 @@ async def find_contacts(company_name: str, company_url: str, job_description: st
                 continue
             seen_names.add(name.lower())
             candidates = guess_emails(company_name, company_url, name)
-            for g in candidates[:1]:
+            for g in candidates[:3]:
                 if not _is_bad_email(g["email"]) and _email_matches_domain(g["email"], domain):
                     g["name"] = name
                     g["title"] = c.get("title", "")
                     guessed.append(g)
     else:
-        logger.info("[%s] Domain %s is catch-all — skipping ALL guesses", company_name, domain)
+        # Catch-all: name-based guesses won't bounce but can't verify.
+        # Allow top-1 pattern per name found from source (first.last@)
+        seen_names = set()
+        for c in names_without_email:
+            name = c["name"]
+            if name.lower() in seen_names:
+                continue
+            seen_names.add(name.lower())
+            candidates = guess_emails(company_name, company_url, name)
+            for g in candidates[:1]:
+                if not _is_bad_email(g["email"]) and _email_matches_domain(g["email"], domain):
+                    g["name"] = name
+                    g["title"] = c.get("title", "")
+                    g["source"] = "guess_named_catchall"
+                    guessed.append(g)
 
     # Verify found emails through fortress (is_from_source=True — they were found)
     merged = _merge_contacts(all_with_email)
@@ -516,24 +537,35 @@ async def find_contacts(company_name: str, company_url: str, job_description: st
         if len(valid) >= MAX_EMAILS_PER_COMPANY:
             break
 
-    # Verify guessed emails (is_from_source=False — these are guesses)
-    if len(valid) < MAX_EMAILS_PER_COMPANY and guessed and not is_domain_catchall:
-        logger.info("[%s] Trying %d guessed emails (SMTP verify each)...", company_name, len(guessed))
+    # Verify guessed emails
+    if len(valid) < MAX_EMAILS_PER_COMPANY and guessed:
+        logger.info("[%s] Trying %d guessed emails...", company_name, len(guessed))
         for g in guessed:
             if len(valid) >= MAX_EMAILS_PER_COMPANY:
                 break
             if any(g["email"].lower() == v["email"].lower() for v in valid):
                 continue
-            if await _verify_email_fortress(g["email"], domain, is_from_source=False):
+            # Catch-all guesses are safe (won't bounce) — pass through fortress
+            source_flag = is_domain_catchall  # treat catch-all guesses as "from source"
+            if await _verify_email_fortress(g["email"], domain, is_from_source=source_flag):
                 valid.append(g)
                 logger.info("[%s]   GUESS VERIFIED: %s", company_name, g["email"])
 
     # Strategy 5: Generic job email fallback
-    # ONLY on non-catch-all, reliable-provider (Google) domains
-    # Microsoft/ImprovMX/parked domains accept everything then bounce
-    if not valid and not is_domain_catchall and has_valid_mx(domain):
+    if not valid and has_valid_mx(domain):
         provider, is_reliable = _get_mx_provider(domain)
-        if is_reliable:
+        if provider == "parked":
+            logger.info("[%s] Skipping generic emails — domain is parked", company_name)
+        elif is_domain_catchall:
+            # Catch-all: careers@ won't bounce, just might go to catch-all inbox
+            candidate = f"careers@{domain}"
+            valid.append({
+                "email": candidate, "name": "",
+                "title": "Careers Department",
+                "confidence": 0.40, "source": "generic_catchall",
+            })
+            logger.info("[%s]   GENERIC CATCHALL: %s (won't bounce)", company_name, candidate)
+        elif is_reliable:
             for prefix, conf in [("careers", 0.45), ("hiring", 0.45), ("hr", 0.40),
                                   ("jobs", 0.40), ("talent", 0.40)]:
                 candidate = f"{prefix}@{domain}"
@@ -546,7 +578,16 @@ async def find_contacts(company_name: str, company_url: str, job_description: st
                     logger.info("[%s]   GENERIC VERIFIED: %s (provider=%s)", company_name, candidate, provider)
                     break
         else:
-            logger.info("[%s] Skipping generic emails — %s provider unreliable for SMTP", company_name, provider)
+            candidate = f"careers@{domain}"
+            if _smtp_verify(candidate):
+                valid.append({
+                    "email": candidate, "name": "",
+                    "title": "Careers Department",
+                    "confidence": 0.40, "source": "generic_job_email",
+                })
+                logger.info("[%s]   GENERIC VERIFIED: %s (provider=%s, unreliable)", company_name, candidate, provider)
+            else:
+                logger.info("[%s] Generic emails failed SMTP on %s provider", company_name, provider)
 
     if not valid:
         logger.info("[%s] No verified emails (found=%d, guessed=%d, catchall=%s)",

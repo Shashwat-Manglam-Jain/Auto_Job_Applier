@@ -103,6 +103,20 @@ NON_NAME_WORDS = {
     "year", "york", "your",
     # common non-person capitalized pairs from search snippets
     "customer", "onsite", "hybrid", "junior", "overflow",
+    # place names / organizations that look like person names
+    "boston", "celtics", "colgate", "university", "college",
+    "stanford", "harvard", "oxford", "cambridge", "princeton",
+    "houston", "dallas", "austin", "denver", "seattle",
+    "portland", "phoenix", "atlanta", "chicago", "detroit",
+    "london", "berlin", "paris", "tokyo", "toronto", "sydney",
+    "angeles", "francisco", "diego", "antonio", "carolina",
+    "virginia", "georgia", "florida", "texas", "york",
+    "netflix", "spotify", "airbnb", "oracle", "intel",
+    "naval", "institute", "foundation", "association",
+    "republic", "kingdom", "island", "mountain", "valley",
+    "street", "avenue", "boulevard", "highway", "bridge",
+    "morning", "evening", "golden", "silver", "diamond",
+    "national", "federal", "capital", "central", "pacific",
 }
 
 SKIP_EMAIL_DOMAINS = {
@@ -294,12 +308,15 @@ async def _run_query(client: httpx.AsyncClient, query: str, use_google_api: bool
 async def search_contacts(company_name: str, domain: str) -> list[dict]:
     queries = [
         f'"{company_name}" HR email hiring',
-        f'"{company_name}" CTO OR CEO email',
+        f'"{company_name}" CTO OR CEO OR founder email',
         f'"{company_name}" careers OR talent email',
+        f'"{company_name}" "head of" OR "director" engineering email',
+        f'"{company_name}" recruiter OR recruiting email',
     ]
     if domain:
         queries.append(f'"@{domain}" hiring OR HR OR recruiter')
         queries.append(f'site:{domain} "@{domain}" team OR about OR contact')
+        queries.append(f'"@{domain}" CTO OR CEO OR founder OR engineer')
 
     all_contacts = []
     use_google_api = bool(GOOGLE_API_KEYS) and bool(GOOGLE_CSE_ID)
