@@ -41,10 +41,10 @@ for i in range(1, 4):
 
 DAILY_EMAIL_CAP = _env_int("DAILY_EMAIL_CAP", 1000)
 PER_ACCOUNT_CAP = _env_int("PER_ACCOUNT_CAP", 500)
-SEND_DELAY_MIN = _env_int("SEND_DELAY_MIN", 3)
-SEND_DELAY_MAX = _env_int("SEND_DELAY_MAX", 10)
+SEND_DELAY_MIN = _env_int("SEND_DELAY_MIN", 2)
+SEND_DELAY_MAX = _env_int("SEND_DELAY_MAX", 6)
 MIN_MATCH_CONFIDENCE = _env_float("MIN_MATCH_CONFIDENCE", 0.3)
-MIN_EMAIL_CONFIDENCE = _env_float("MIN_EMAIL_CONFIDENCE", 0.4)
+MIN_EMAIL_CONFIDENCE = _env_float("MIN_EMAIL_CONFIDENCE", 0.35)
 REPORT_TO_EMAIL = _env("REPORT_TO_EMAIL")
 MODE = _env("MODE", "prod").lower()  # "dev" = India only, "prod" = international remote
 

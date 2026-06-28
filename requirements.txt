@@ -6,3 +6,5 @@ openpyxl
 lxml
 fpdf2
 python-dotenv
+psycopg2-binary
+playwright

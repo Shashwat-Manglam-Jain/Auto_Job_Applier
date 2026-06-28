@@ -35,8 +35,6 @@ REMOTE_FIRST_INDICATORS = [
 
 
 def score_company(job: dict) -> float:
-    if is_big_company(job.get("company_name", "")):
-        return -1.0
     score = 0.0
     title_lower = job.get("title", "").lower()
     desc_lower = job.get("description", "")[:1000].lower()

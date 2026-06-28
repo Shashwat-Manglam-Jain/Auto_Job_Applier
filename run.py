@@ -20,12 +20,20 @@ from config import (
     INELIGIBLE_KEYWORDS, TARGET_COUNTRIES, TECH_KEYWORDS, MODE,
 )
 from matcher import match_role, smart_match_role, is_tech_job
-from scorer import score_company, is_big_company
+from scorer import score_company
 from customizer import generate_custom_resume, _extract_job_techs, _format_tech
 from sender import compose_email, send_email, send_manual_email, _get_next_account, _reset_counts
 from reporter import send_daily_report
 from contacts.finder import find_contacts
 from resume_templates import get_template
+
+_neon_ok = False
+try:
+    from neon_db import (init_db, save_company, save_job, save_contact,
+                         save_application, mark_company_sent, get_sent_company_names)
+    _HAS_NEON = True
+except ImportError:
+    _HAS_NEON = False
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,7 +44,7 @@ logger = logging.getLogger("pipeline")
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
-MAX_EMAILS_PER_COMPANY = 2
+MAX_EMAILS_PER_COMPANY = 3
 
 
 def _get_all_scrapers():
@@ -181,6 +189,16 @@ async def run_pipeline():
         logger.error("No SMTP accounts configured. Set SMTP_ACCOUNT_1/SMTP_PASSWORD_1 in .env")
         return
 
+    global _neon_ok
+    if _HAS_NEON:
+        try:
+            init_db()
+            _neon_ok = True
+            logger.info("Neon DB initialized")
+        except Exception as e:
+            logger.warning("Neon DB init failed, continuing without DB: %s", e)
+            _neon_ok = False
+
     _reset_counts()
     stats = {
         "total_scraped": 0, "today_jobs": 0, "filtered_jobs": 0,
@@ -213,16 +231,12 @@ async def run_pipeline():
         # Step 2: Filter + Dedup + Match + Score (fast, <10s)
         logger.info("\n[Step 2/7] Filter → Dedup → Match → Score...")
         filtered = []
-        big_skipped = 0
         for job in all_jobs:
             title = job.get("title", "").strip()
             company = job.get("company_name", "").strip()
             if not title or not company:
                 continue
             if title.lower().startswith("list ") or len(title) < 5:
-                continue
-            if is_big_company(company):
-                big_skipped += 1
                 continue
             if not is_tech_job(title, job.get("tags", [])):
                 continue
@@ -231,6 +245,18 @@ async def run_pipeline():
             filtered.append(job)
 
         unique_jobs = _dedup_jobs(filtered)
+
+        sent_names = set()
+        if _neon_ok:
+            try:
+                sent_names = get_sent_company_names()
+                if sent_names:
+                    before = len(unique_jobs)
+                    unique_jobs = [j for j in unique_jobs
+                                   if j.get("company_name", "").lower().strip() not in sent_names]
+                    logger.info("Skipped %d already-contacted companies", before - len(unique_jobs))
+            except Exception as e:
+                logger.debug("sent_names lookup failed: %s", e)
 
         for job in unique_jobs:
             role_key, confidence = smart_match_role(job)
@@ -246,8 +272,44 @@ async def run_pipeline():
         stats["filtered_jobs"] = len(filtered)
         stats["unique_jobs"] = len(unique_jobs)
         stats["matched_jobs"] = len(matched)
-        logger.info("Filtered: %d | Unique: %d | Matched: %d | Big co skipped: %d",
-                    len(filtered), len(unique_jobs), len(matched), big_skipped)
+        logger.info("Filtered: %d | Unique: %d | Matched: %d",
+                    len(filtered), len(unique_jobs), len(matched))
+
+        if _neon_ok:
+            logger.info("Saving %d matched jobs to Neon DB...", len(matched))
+            from contacts.email_guesser import get_domain_from_url
+            db_saved = 0
+            for job in matched:
+                try:
+                    domain = get_domain_from_url(job.get("company_url", ""))
+                    company_id = save_company(
+                        name=job.get("company_name", ""),
+                        domain=domain,
+                        url=job.get("company_url", ""),
+                    )
+                    if company_id:
+                        job["_db_company_id"] = company_id
+                        job_id = save_job(
+                            company_id=company_id,
+                            source=job.get("source", ""),
+                            source_id=job.get("source_id", ""),
+                            title=job.get("title", ""),
+                            url=job.get("url", ""),
+                            description=job.get("description", ""),
+                            tags=job.get("tags", []),
+                            location=job.get("location", ""),
+                            salary_min=job.get("salary_min"),
+                            salary_max=job.get("salary_max"),
+                            role_key=job.get("role_key", ""),
+                            match_confidence=job.get("match_confidence", 0),
+                            posted_at=job.get("posted_at", ""),
+                        )
+                        if job_id:
+                            job["_db_job_id"] = job_id
+                            db_saved += 1
+                except Exception as e:
+                    logger.debug("DB save failed for %s: %s", job.get("company_name"), e)
+            logger.info("Saved %d/%d jobs to Neon DB", db_saved, len(matched))
 
         # Step 3: Find contacts (budget: 55%)
         contact_deadline = pipeline_start + _PIPELINE_MAX_SECONDS * (_SCRAPE_BUDGET + _CONTACT_BUDGET)
@@ -262,7 +324,7 @@ async def run_pipeline():
                 companies_processed.add(company_key)
                 unique_company_jobs.append(job)
 
-        _CONTACT_BATCH = 12
+        _CONTACT_BATCH = 16
 
         async def _find_for_job(job):
             try:
@@ -302,6 +364,30 @@ async def run_pipeline():
         applications.sort(key=lambda a: a.get("contact_confidence", 0), reverse=True)
         applications = applications[:DAILY_EMAIL_CAP]
         stats["contacts_found"] = len(applications)
+
+        if _neon_ok:
+            for app in applications:
+                try:
+                    company_id = app.get("_db_company_id")
+                    if not company_id:
+                        for job in matched:
+                            if job.get("company_name", "").lower() == app.get("company_name", "").lower():
+                                company_id = job.get("_db_company_id")
+                                break
+                    if company_id:
+                        contact_id = save_contact(
+                            company_id=company_id,
+                            email=app.get("contact_email", ""),
+                            name=app.get("contact_name", ""),
+                            title=app.get("contact_title", ""),
+                            confidence=app.get("contact_confidence", 0),
+                            source="auto_discovery",
+                            verified=True,
+                        )
+                        if contact_id:
+                            app["_db_contact_id"] = contact_id
+                except Exception as e:
+                    logger.debug("DB contact save failed: %s", e)
 
         logger.info("Applications ready: %d verified emails (%.0fs elapsed)",
                     len(applications), _time.time() - pipeline_start)
@@ -402,8 +488,29 @@ async def run_pipeline():
                 result["role_title"] = role_title
                 sent_results.append(result)
 
+                if _neon_ok:
+                    try:
+                        db_job_id = app.get("_db_job_id")
+                        db_contact_id = app.get("_db_contact_id")
+                        if db_job_id:
+                            save_application(
+                                job_id=db_job_id,
+                                contact_id=db_contact_id,
+                                status=result["status"],
+                                sent_at=datetime.now(timezone.utc).isoformat() if result["status"] == "sent" else None,
+                                sent_via=result.get("via", ""),
+                                error=result.get("error", ""),
+                            )
+                    except Exception as e:
+                        logger.debug("DB application save failed: %s", e)
+
                 if result["status"] == "sent":
                     consecutive_bounces = 0
+                    if _neon_ok:
+                        try:
+                            mark_company_sent(company_name, app["contact_email"], smtp_account["email"])
+                        except Exception:
+                            pass
                     logger.info("  [%d/%d] Sent to %s (%s) via %s",
                                i + 1, len(applications), app["contact_email"],
                                company_name, smtp_account["email"])

@@ -351,6 +351,10 @@ class LinkedInGuestScraper(BaseScraper):
         "remote+software+engineer",
         "remote+developer",
         "remote+backend+engineer",
+        "remote+frontend+developer",
+        "remote+fullstack+engineer",
+        "remote+devops+engineer",
+        "remote+python+developer",
     ]
 
     async def _scrape_impl(self) -> list[dict]:
@@ -549,6 +553,335 @@ class YCJobsScraper(BaseScraper):
             return []
 
 
+class IndeedScraper(BaseScraper):
+    """Scrape Indeed for remote software engineering jobs."""
+    name = "indeed"
+    rate_limit = 3.0
+
+    SEARCHES = [
+        "remote software engineer",
+        "remote developer",
+        "remote backend engineer",
+        "remote frontend developer",
+        "remote devops engineer",
+    ]
+
+    async def _scrape_impl(self) -> list[dict]:
+        try:
+            jobs = []
+            seen = set()
+            for query in self.SEARCHES:
+                for start in (0, 10):
+                    try:
+                        resp = await self._get(
+                            f"https://www.indeed.com/jobs"
+                            f"?q={query.replace(' ', '+')}"
+                            f"&l=Remote&sc=0kf%3Aattr%28DSQF7%29%3B"
+                            f"&fromage=1&start={start}"
+                        )
+                    except Exception:
+                        continue
+
+                    soup = BeautifulSoup(resp.text, "lxml")
+                    cards = soup.select(".job_seen_beacon, .resultContent")
+
+                    for card in cards:
+                        # Extract title
+                        title_el = card.select_one("h2.jobTitle a") or card.select_one("a[data-jk]")
+                        if not title_el:
+                            continue
+
+                        title = title_el.get_text(strip=True)
+                        if not title:
+                            continue
+
+                        # Extract job ID and build URL
+                        jk = title_el.get("data-jk", "")
+                        if not jk:
+                            # Try to find data-jk on a parent or sibling
+                            jk_el = card.select_one("[data-jk]")
+                            jk = jk_el.get("data-jk", "") if jk_el else ""
+                        if not jk:
+                            # Fall back to href parsing
+                            href = title_el.get("href", "")
+                            if "jk=" in href:
+                                jk = href.split("jk=")[-1].split("&")[0]
+                        if not jk:
+                            continue
+
+                        if jk in seen:
+                            continue
+                        seen.add(jk)
+
+                        job_url = f"https://www.indeed.com/viewjob?jk={jk}"
+
+                        # Extract company name
+                        company_el = (
+                            card.select_one('span[data-testid="company-name"]')
+                            or card.select_one(".companyName")
+                        )
+                        company_name = company_el.get_text(strip=True) if company_el else ""
+
+                        # Extract location
+                        loc_el = (
+                            card.select_one('div[data-testid="text-location"]')
+                            or card.select_one(".companyLocation")
+                        )
+                        location = loc_el.get_text(strip=True) if loc_el else ""
+
+                        # Filter for remote jobs only
+                        loc_lower = location.lower()
+                        if location and "remote" not in loc_lower:
+                            continue
+
+                        # Extract date
+                        date_el = card.select_one(".date")
+                        date_str = date_el.get_text(strip=True) if date_el else ""
+                        if date_str:
+                            date_lower = date_str.lower()
+                            # Skip listings older than a couple of days
+                            if any(x in date_lower for x in ["week", "month", "30+"]):
+                                continue
+
+                        jobs.append(self._job(
+                            source_id=jk,
+                            url=job_url,
+                            title=title,
+                            company_name=company_name,
+                            location=location or "Remote",
+                            posted_at=date_str,
+                        ))
+            return jobs
+        except Exception as e:
+            logger.error(f"[{self.name}] {e}")
+            return []
+
+
+class WellfoundScraper(BaseScraper):
+    """Scrape Wellfound (AngelList) for remote engineering jobs using Playwright."""
+    name = "wellfound"
+    rate_limit = 3.0
+
+    async def _scrape_impl(self) -> list[dict]:
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            logger.warning("[%s] playwright not installed, skipping", self.name)
+            return []
+
+        jobs = []
+        try:
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(headless=True)
+                page = await browser.new_page()
+                await page.goto(
+                    "https://wellfound.com/jobs?remote=true&role=engineering",
+                    wait_until="networkidle",
+                    timeout=30000,
+                )
+
+                # Scroll down 3 times to trigger lazy-loaded job cards
+                for _ in range(3):
+                    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    await asyncio.sleep(2)
+
+                html = await page.content()
+                await browser.close()
+
+            soup = BeautifulSoup(html, "lxml")
+
+            # Wellfound is a React app; try multiple card selectors
+            cards = (
+                soup.select("[class*='job-card'], [class*='JobCard']")
+                or soup.select("[class*='styles_jobListing'], [class*='JobListing']")
+                or soup.select("div[class*='listing'] a[href*='/jobs/']")
+                or soup.select("a[href*='/jobs/']")
+            )
+
+            seen = set()
+            for card in cards:
+                # Find the link element
+                if card.name == "a" and card.get("href"):
+                    link_el = card
+                else:
+                    link_el = card.find("a", href=True)
+                if not link_el:
+                    continue
+
+                href = link_el.get("href", "")
+                if not href or href == "#":
+                    continue
+                if not href.startswith("http"):
+                    href = urljoin("https://wellfound.com", href)
+
+                # Skip non-job links (navigation, filters, etc.)
+                if "/jobs" not in href or href.rstrip("/") == "https://wellfound.com/jobs":
+                    continue
+                if href in seen:
+                    continue
+                seen.add(href)
+
+                # Extract title
+                title_el = card.select_one(
+                    "h2, h3, h4, "
+                    "[class*='title'], [class*='Title'], "
+                    "[class*='jobTitle'], [class*='JobTitle']"
+                ) if card.name != "a" else None
+                title = _text(title_el) if title_el else link_el.get_text(strip=True)
+                if not title or len(title) < 3:
+                    continue
+
+                # Extract company name
+                company_el = card.select_one(
+                    "[class*='company'], [class*='Company'], "
+                    "[class*='companyName'], [class*='CompanyName']"
+                ) if card.name != "a" else None
+                company_name = _text(company_el) if company_el else ""
+
+                # Extract location
+                loc_el = card.select_one(
+                    "[class*='location'], [class*='Location']"
+                ) if card.name != "a" else None
+                location = _text(loc_el) if loc_el else "Remote"
+
+                # Extract tags (skills, technologies)
+                tag_els = card.select(
+                    "[class*='tag'], [class*='Tag'], "
+                    "[class*='skill'], [class*='Skill'], "
+                    "[class*='badge'], [class*='Badge']"
+                ) if card.name != "a" else []
+                tags = [_text(t) for t in tag_els if _text(t)]
+
+                jobs.append(self._job(
+                    source_id=hashlib.md5(href.encode()).hexdigest(),
+                    url=href,
+                    title=title,
+                    company_name=company_name,
+                    tags=tags or ["remote", "engineering"],
+                    location=location,
+                ))
+            return jobs
+        except Exception as e:
+            logger.error(f"[{self.name}] {e}")
+            return []
+
+
+class WeWorkRemotelyScraper(BaseScraper):
+    """Scrape We Work Remotely RSS feed for remote programming jobs."""
+    name = "weworkremotely"
+    rate_limit = 3.0
+
+    RSS_URLS = [
+        "https://weworkremotely.com/categories/remote-programming-jobs",
+        "https://weworkremotely.com/categories/remote-devops-sysadmin-jobs",
+    ]
+
+    async def _scrape_impl(self) -> list[dict]:
+        try:
+            jobs = []
+            seen = set()
+
+            for rss_url in self.RSS_URLS:
+                try:
+                    resp = await self._get(rss_url)
+                except Exception:
+                    continue
+
+                soup = BeautifulSoup(resp.text, "xml")
+                items = soup.find_all("item")
+
+                for item in items:
+                    title_el = item.find("title")
+                    link_el = item.find("link")
+                    if not title_el or not link_el:
+                        continue
+
+                    raw_title = title_el.get_text(strip=True)
+                    link = link_el.get_text(strip=True)
+                    if not raw_title or not link:
+                        continue
+                    if link in seen:
+                        continue
+                    seen.add(link)
+
+                    # Title format: "Company: Job Title"
+                    company_name = ""
+                    title = raw_title
+                    if ": " in raw_title:
+                        company_name, title = raw_title.split(": ", 1)
+
+                    pub_date = ""
+                    pub_el = item.find("pubDate")
+                    if pub_el:
+                        pub_date = pub_el.get_text(strip=True)
+
+                    jobs.append(self._job(
+                        source_id=hashlib.md5(link.encode()).hexdigest(),
+                        url=link,
+                        title=title,
+                        company_name=company_name,
+                        posted_at=pub_date,
+                        location="Remote",
+                    ))
+            return jobs
+        except Exception as e:
+            logger.error(f"[{self.name}] {e}")
+            return []
+
+
+class ToptalScraper(BaseScraper):
+    """Scrape Toptal for freelance jobs."""
+    name = "toptal"
+    rate_limit = 3.0
+
+    async def _scrape_impl(self) -> list[dict]:
+        try:
+            resp = await self._get("https://www.toptal.com/freelance-jobs")
+            soup = BeautifulSoup(resp.text, "lxml")
+
+            jobs = []
+            seen = set()
+
+            # Look for links containing /freelance-jobs/ (individual job pages)
+            links = soup.select("a[href*='/freelance-jobs/']")
+            for link_el in links:
+                href = link_el.get("href", "")
+                if not href:
+                    continue
+                if not href.startswith("http"):
+                    href = urljoin("https://www.toptal.com", href)
+
+                # Skip the listing page itself
+                if href.rstrip("/") == "https://www.toptal.com/freelance-jobs":
+                    continue
+                if href in seen:
+                    continue
+                seen.add(href)
+
+                title = link_el.get_text(strip=True)
+                if not title or len(title) < 3:
+                    continue
+
+                # Try to find company from parent card
+                parent = link_el.parent
+                company_name = ""
+                if parent:
+                    company_el = parent.select_one("[class*='company'], [class*='Company']")
+                    company_name = _text(company_el) if company_el else ""
+
+                jobs.append(self._job(
+                    source_id=hashlib.md5(href.encode()).hexdigest(),
+                    url=href,
+                    title=title,
+                    company_name=company_name,
+                    location="Remote",
+                ))
+            return jobs
+        except Exception as e:
+            logger.error(f"[{self.name}] {e}")
+            return []
+
+
 def get_all_html_scrapers() -> list[BaseScraper]:
     return [
         NoDeskScraper(),
@@ -560,4 +893,7 @@ def get_all_html_scrapers() -> list[BaseScraper]:
         DailyRemoteScraper(),
         EURemoteJobsScraper(),
         YCJobsScraper(),
+        IndeedScraper(),
+        WellfoundScraper(),
+        WeWorkRemotelyScraper(),
     ]
