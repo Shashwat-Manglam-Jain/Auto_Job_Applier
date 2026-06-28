@@ -1,7 +1,18 @@
 """
 Main pipeline entry point.
-Run: python run.py
-Or via GitHub Actions cron.
+
+Usage:
+  python run.py                  # run ALL scrapers in one process
+  python run.py --pipeline 1     # LinkedIn (heavy, 14 requests)
+  python run.py --pipeline 2     # Indeed (rate-limited, 10 requests)
+  python run.py --pipeline 3     # Fast APIs (RemoteOK, Arbeitnow, Jobicy)
+  python run.py --pipeline 4     # Paginated APIs (Remotive, Himalayas, TheMuse, HN Hiring)
+  python run.py --pipeline 5     # HTML boards (JustRemote, NoDesk, 4DayWeek, BuiltIn, DailyRemote)
+  python run.py --pipeline 6     # Startup & niche (YC, Wellfound, ArcDev, EURemoteJobs)
+  python run.py --pipeline 7     # RSS feeds (WWR, WorkingNomads, Golang, Dribbble, LaraJobs, VueJobs)
+  ./run_all.sh                   # launch all 7 pipelines in parallel
+  python run.py --report         # scrape-only report (no emails)
+  python run.py --manual         # interactive manual send
 """
 
 import asyncio
@@ -46,6 +57,48 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 MAX_EMAILS_PER_COMPANY = 3
 
+# ── Pipeline definitions ─────────────────────────────────────────────────
+# Each pipeline is a subset of scrapers that runs independently.
+# All pipelines share the same Neon DB so dedup is automatic.
+PIPELINES = {
+    "1": {
+        "name": "linkedin",
+        "scrapers": ["linkedin"],
+        "email_cap": 30,
+    },
+    "2": {
+        "name": "indeed",
+        "scrapers": ["indeed"],
+        "email_cap": 25,
+    },
+    "3": {
+        "name": "fast-apis",
+        "scrapers": ["remoteok", "arbeitnow", "jobicy"],
+        "email_cap": 25,
+    },
+    "4": {
+        "name": "paginated-apis",
+        "scrapers": ["remotive", "himalayas", "themuse", "hn_hiring"],
+        "email_cap": 25,
+    },
+    "5": {
+        "name": "html-boards",
+        "scrapers": ["justremote", "nodesk", "4dayweek", "builtin", "dailyremote"],
+        "email_cap": 20,
+    },
+    "6": {
+        "name": "startup-niche",
+        "scrapers": ["ycjobs", "wellfound", "arcdev", "euremotejobs"],
+        "email_cap": 20,
+    },
+    "7": {
+        "name": "rss-feeds",
+        "scrapers": ["weworkremotely", "workingnomads", "golangjobs",
+                      "dribbble", "larajobs", "vuejobs"],
+        "email_cap": 15,
+    },
+}
+
 
 def _get_all_scrapers():
     scrapers = []
@@ -65,6 +118,19 @@ def _get_all_scrapers():
     except Exception as e:
         logger.warning("Failed to load HTML scrapers: %s", e)
     return scrapers
+
+
+def _get_pipeline_scrapers(pipeline_id: str):
+    """Load only the scrapers assigned to this pipeline."""
+    all_scrapers = _get_all_scrapers()
+    cfg = PIPELINES.get(pipeline_id)
+    if not cfg:
+        logger.error("Unknown pipeline: %s. Valid: %s", pipeline_id,
+                      ", ".join(PIPELINES.keys()))
+        return [], cfg
+    allowed = set(cfg["scrapers"])
+    selected = [s for s in all_scrapers if s.name in allowed]
+    return selected, cfg
 
 
 def _is_eligible(job: dict) -> bool:
@@ -173,15 +239,25 @@ def _time_left(start_time: float) -> float:
     return max(0, _PIPELINE_MAX_SECONDS - (time.time() - start_time))
 
 
-async def run_pipeline():
+async def run_pipeline(pipeline_id: str | None = None):
     import time as _time
     pipeline_start = _time.time()
 
+    email_cap = DAILY_EMAIL_CAP
+    pipeline_label = "ALL"
+    pipeline_cfg = None
+    if pipeline_id:
+        _, pipeline_cfg = _get_pipeline_scrapers(pipeline_id)
+        if not pipeline_cfg:
+            return
+        email_cap = pipeline_cfg.get("email_cap", 15)
+        pipeline_label = f"{pipeline_id} ({pipeline_cfg['name']})"
+
     logger.info("=" * 60)
-    logger.info("Starting Auto-Apply Pipeline — %s",
-                datetime.now(IST).strftime("%Y-%m-%d %H:%M IST"))
+    logger.info("Starting Auto-Apply Pipeline [%s] — %s",
+                pipeline_label, datetime.now(IST).strftime("%Y-%m-%d %H:%M IST"))
     logger.info("Mode: %s | Email cap: %d | SMTP accounts: %d | Time budget: %dmin",
-                MODE.upper(), DAILY_EMAIL_CAP, len(SMTP_ACCOUNTS),
+                MODE.upper(), email_cap, len(SMTP_ACCOUNTS),
                 _PIPELINE_MAX_SECONDS // 60)
     logger.info("=" * 60)
 
@@ -212,12 +288,15 @@ async def run_pipeline():
     report_sent = False
 
     try:
-        # Step 1: Scrape (budget: 15%)
+        # Step 1: Scrape (budget: 12%)
         scrape_deadline = pipeline_start + _PIPELINE_MAX_SECONDS * _SCRAPE_BUDGET
-        logger.info("\n[Step 1/7] Scraping all platforms (budget: %dmin)...",
+        logger.info("\n[Step 1/5] Scraping platforms (budget: %dmin)...",
                     int(_PIPELINE_MAX_SECONDS * _SCRAPE_BUDGET / 60))
-        scrapers = _get_all_scrapers()
-        logger.info("Loaded %d scrapers", len(scrapers))
+        if pipeline_id:
+            scrapers, _ = _get_pipeline_scrapers(pipeline_id)
+        else:
+            scrapers = _get_all_scrapers()
+        logger.info("Loaded %d scrapers for pipeline [%s]", len(scrapers), pipeline_label)
         all_jobs, per_source = await _scrape_all(scrapers)
         stats["total_scraped"] = len(all_jobs)
         stats["per_source"] = per_source
@@ -229,7 +308,7 @@ async def run_pipeline():
             return
 
         # Step 2: Filter + Dedup + Match + Score (fast, <10s)
-        logger.info("\n[Step 2/7] Filter → Dedup → Match → Score...")
+        logger.info("\n[Step 2/5] Filter → Dedup → Match → Score...")
         filtered = []
         for job in all_jobs:
             title = job.get("title", "").strip()
@@ -313,7 +392,7 @@ async def run_pipeline():
 
         # Step 3: Find contacts (budget: 55%)
         contact_deadline = pipeline_start + _PIPELINE_MAX_SECONDS * (_SCRAPE_BUDGET + _CONTACT_BUDGET)
-        logger.info("\n[Step 3/7] Discovering contacts (budget: %dmin)...",
+        logger.info("\n[Step 3/5] Discovering contacts (budget: %dmin)...",
                     int(_PIPELINE_MAX_SECONDS * _CONTACT_BUDGET / 60))
 
         companies_processed = set()
@@ -350,7 +429,7 @@ async def run_pipeline():
                 return []
 
         for batch_start in range(0, len(unique_company_jobs), _CONTACT_BATCH):
-            if len(applications) >= DAILY_EMAIL_CAP:
+            if len(applications) >= email_cap:
                 break
             if _time.time() > contact_deadline:
                 logger.warning("Contact discovery time budget exceeded — moving to send phase")
@@ -362,7 +441,7 @@ async def run_pipeline():
 
         applications = _dedup_applications(applications)
         applications.sort(key=lambda a: a.get("contact_confidence", 0), reverse=True)
-        applications = applications[:DAILY_EMAIL_CAP]
+        applications = applications[:email_cap]
         stats["contacts_found"] = len(applications)
 
         if _neon_ok:
@@ -393,7 +472,7 @@ async def run_pipeline():
                     len(applications), _time.time() - pipeline_start)
 
         # Step 4: Send report ONCE with all job/company data
-        logger.info("\n[Step 4/7] Sending report...")
+        logger.info("\n[Step 4/5] Sending report...")
         try:
             send_daily_report(stats, [], applications, all_jobs)
             report_sent = True
@@ -406,7 +485,7 @@ async def run_pipeline():
             logger.info("No applications to send.")
         else:
             send_deadline = pipeline_start + _PIPELINE_MAX_SECONDS
-            logger.info("\n[Step 5/7] Sending %d emails (budget: %dmin)...",
+            logger.info("\n[Step 5/5] Sending %d emails (budget: %dmin)...",
                         len(applications),
                         int(_PIPELINE_MAX_SECONDS * _SEND_BUDGET / 60))
             consecutive_bounces = 0
@@ -535,8 +614,7 @@ async def run_pipeline():
     except Exception as e:
         logger.error("Pipeline error: %s", e, exc_info=True)
     finally:
-        import time as _time2
-        elapsed = _time2.time() - pipeline_start
+        elapsed = _time.time() - pipeline_start
         sent_ok = [r for r in sent_results if r.get("status") == "sent"]
         sent_fail = [r for r in sent_results if r.get("status") == "failed"]
         sent_skip = [r for r in sent_results if r.get("status") == "skipped"]
@@ -733,5 +811,31 @@ if __name__ == "__main__":
         asyncio.run(run_scrape_report())
     elif "--manual" in sys.argv:
         run_manual_send()
+    elif "--pipeline" in sys.argv:
+        idx = sys.argv.index("--pipeline")
+        pid = sys.argv[idx + 1] if idx + 1 < len(sys.argv) else None
+        if not pid or pid not in PIPELINES:
+            print(f"Usage: python run.py --pipeline <1-{len(PIPELINES)}>")
+            print("Available pipelines:")
+            for k, v in PIPELINES.items():
+                print(f"  {k}: {v['name']} — {', '.join(v['scrapers'])}")
+            sys.exit(1)
+        asyncio.run(run_pipeline(pipeline_id=pid))
+    elif "--all" in sys.argv:
+        import subprocess
+        procs = []
+        for pid in PIPELINES:
+            p = subprocess.Popen(
+                [sys.executable, __file__, "--pipeline", pid],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            )
+            procs.append((pid, p))
+            logger.info("Launched pipeline %s (PID %d)", pid, p.pid)
+        for pid, p in procs:
+            out, _ = p.communicate()
+            logger.info("Pipeline %s finished (exit %d)", pid, p.returncode)
+            if out:
+                for line in out.strip().split("\n")[-5:]:
+                    logger.info("  [%s] %s", pid, line)
     else:
         asyncio.run(run_pipeline())
