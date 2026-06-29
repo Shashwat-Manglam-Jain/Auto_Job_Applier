@@ -237,7 +237,7 @@ async def _search_google_api(client: httpx.AsyncClient, query: str) -> list[dict
                     title = item.get("title", "").lower()
                     if any(kw in link.lower() + " " + title for kw in ["team", "about", "contact", "people", "leadership", "founder"]):
                         promising_urls.append(link)
-                for url in promising_urls[:2]:
+                for url in promising_urls[:4]:
                     page_contacts = await _fetch_page_emails(client, url)
                     contacts.extend(page_contacts)
                 return contacts
@@ -297,7 +297,7 @@ async def _search_all_engines(client: httpx.AsyncClient, query: str) -> list[dic
 
 async def _run_query(client: httpx.AsyncClient, query: str, use_google_api: bool, query_idx: int) -> list[dict]:
     results = []
-    if use_google_api and query_idx < 3:
+    if use_google_api and query_idx < 5:
         google_results = await _search_google_api(client, query)
         results.extend(google_results)
     engine_results = await _search_all_engines(client, query)
@@ -312,11 +312,15 @@ async def search_contacts(company_name: str, domain: str) -> list[dict]:
         f'"{company_name}" careers OR talent email',
         f'"{company_name}" "head of" OR "director" engineering email',
         f'"{company_name}" recruiter OR recruiting email',
+        f'"{company_name}" "people operations" OR "talent acquisition" email',
+        f'"{company_name}" "engineering manager" OR "tech lead" email',
+        f'"{company_name}" contact email team',
     ]
     if domain:
         queries.append(f'"@{domain}" hiring OR HR OR recruiter')
         queries.append(f'site:{domain} "@{domain}" team OR about OR contact')
         queries.append(f'"@{domain}" CTO OR CEO OR founder OR engineer')
+        queries.append(f'"@{domain}" careers OR jobs OR talent OR people')
 
     all_contacts = []
     use_google_api = bool(GOOGLE_API_KEYS) and bool(GOOGLE_CSE_ID)

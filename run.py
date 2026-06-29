@@ -55,47 +55,48 @@ logger = logging.getLogger("pipeline")
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
-MAX_EMAILS_PER_COMPANY = 3
+MAX_EMAILS_PER_COMPANY = 5
 
 # ── Pipeline definitions ─────────────────────────────────────────────────
 # Each pipeline is a subset of scrapers that runs independently.
 # All pipelines share the same Neon DB so dedup is automatic.
+# Total email cap across all pipelines: ~1000/day
 PIPELINES = {
     "1": {
         "name": "linkedin",
         "scrapers": ["linkedin"],
-        "email_cap": 30,
+        "email_cap": 200,
     },
     "2": {
         "name": "indeed",
         "scrapers": ["indeed"],
-        "email_cap": 25,
+        "email_cap": 150,
     },
     "3": {
         "name": "fast-apis",
         "scrapers": ["remoteok", "arbeitnow", "jobicy"],
-        "email_cap": 25,
+        "email_cap": 150,
     },
     "4": {
         "name": "paginated-apis",
         "scrapers": ["remotive", "himalayas", "themuse", "hn_hiring"],
-        "email_cap": 25,
+        "email_cap": 150,
     },
     "5": {
         "name": "html-boards",
         "scrapers": ["justremote", "nodesk", "4dayweek", "builtin", "dailyremote"],
-        "email_cap": 20,
+        "email_cap": 120,
     },
     "6": {
         "name": "startup-niche",
         "scrapers": ["ycjobs", "wellfound", "arcdev", "euremotejobs"],
-        "email_cap": 20,
+        "email_cap": 120,
     },
     "7": {
         "name": "rss-feeds",
         "scrapers": ["weworkremotely", "workingnomads", "golangjobs",
                       "dribbble", "larajobs", "vuejobs"],
-        "email_cap": 15,
+        "email_cap": 110,
     },
 }
 
@@ -403,7 +404,7 @@ async def run_pipeline(pipeline_id: str | None = None):
                 companies_processed.add(company_key)
                 unique_company_jobs.append(job)
 
-        _CONTACT_BATCH = 16
+        _CONTACT_BATCH = 24
 
         async def _find_for_job(job):
             try:

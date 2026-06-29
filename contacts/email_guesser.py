@@ -91,6 +91,10 @@ def guess_emails(
             (f"{first}{last}@{domain}", 0.38) if last else None,
             (f"{first}_{last}@{domain}", 0.35) if last else None,
             (f"{first[0]}.{last}@{domain}", 0.35) if last else None,
+            (f"{last}.{first}@{domain}", 0.33) if last else None,
+            (f"{last}@{domain}", 0.30) if last else None,
+            (f"{first}-{last}@{domain}", 0.30) if last else None,
+            (f"{first[0]}{first[1] if len(first) > 1 else ''}{last}@{domain}", 0.28) if last and len(first) > 1 else None,
         ]
         for entry in patterns:
             if entry is None:

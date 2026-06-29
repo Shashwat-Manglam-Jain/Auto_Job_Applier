@@ -63,7 +63,8 @@ def _is_likely_person_name(name: str) -> bool:
 CONTACT_PATHS = [
     "", "/about", "/about-us", "/team", "/our-team", "/people",
     "/contact", "/contact-us", "/careers", "/company",
-    "/leadership", "/founders",
+    "/leadership", "/founders", "/jobs", "/hiring",
+    "/who-we-are", "/meet-the-team", "/staff", "/management",
 ]
 
 HEADERS = {
@@ -300,11 +301,11 @@ async def scrape_company_contacts(company_url: str) -> list[dict]:
                 except Exception:
                     continue
 
-            # Phase 2: Follow up to 5 team member links
+            # Phase 2: Follow team member links for more contacts
             followed = 0
             seen_urls = set()
             for link in team_member_links:
-                if followed >= 2:
+                if followed >= 5:
                     break
                 if link in seen_urls:
                     continue

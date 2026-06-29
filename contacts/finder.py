@@ -30,7 +30,7 @@ from contacts.website_scraper import scrape_company_contacts
 
 logger = logging.getLogger(__name__)
 
-MAX_EMAILS_PER_COMPANY = 3
+MAX_EMAILS_PER_COMPANY = 5
 
 _EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 
@@ -424,9 +424,22 @@ async def find_contacts(company_name: str, company_url: str, job_description: st
 
     # Derive domain from company name if URL was a job board
     if not domain and company_name:
-        slug = re.sub(r"[^a-z0-9]", "", company_name.lower())
-        for tld in (".com", ".io", ".co", ".dev", ".tech", ".org", ".ai"):
-            candidate = f"{slug}{tld}"
+        name_lower = company_name.lower().strip()
+        slug = re.sub(r"[^a-z0-9]", "", name_lower)
+        slug_hyphen = re.sub(r"[^a-z0-9]+", "-", name_lower).strip("-")
+        # Remove common suffixes for better matching
+        for suffix in ("inc", "llc", "ltd", "corp", "co", "labs", "hq",
+                        "technologies", "software", "solutions", "group"):
+            if slug.endswith(suffix) and len(slug) > len(suffix) + 2:
+                slug = slug[:-len(suffix)]
+            if slug_hyphen.endswith(suffix) and len(slug_hyphen) > len(suffix) + 2:
+                slug_hyphen = slug_hyphen[:-(len(suffix) + 1)]
+        candidates = []
+        for s in dict.fromkeys([slug, slug_hyphen]):
+            for tld in (".com", ".io", ".co", ".dev", ".tech", ".org", ".ai",
+                         ".app", ".xyz", ".so", ".sh", ".cc", ".net"):
+                candidates.append(f"{s}{tld}")
+        for candidate in candidates:
             if has_valid_mx(candidate):
                 domain = candidate
                 logger.info("[%s] Derived domain %s from company name", company_name, domain)
@@ -554,13 +567,19 @@ async def find_contacts(company_name: str, company_url: str, job_description: st
                 valid_emails.add(g["email"].lower())
                 logger.info("[%s]   GUESS VERIFIED: %s", company_name, g["email"])
 
-    # Strategy 5: Generic job email fallback — run when we have fewer than MAX
+    # Strategy 5: Generic job email fallback — try every common HR prefix
+    _GENERIC_PREFIXES = [
+        ("careers", 0.45), ("hiring", 0.45), ("hr", 0.42),
+        ("jobs", 0.42), ("talent", 0.40), ("recruit", 0.40),
+        ("recruitment", 0.38), ("people", 0.38), ("joinus", 0.38),
+        ("apply", 0.36), ("work", 0.36), ("team", 0.36),
+    ]
     if len(valid) < MAX_EMAILS_PER_COMPANY and has_valid_mx(domain):
         provider, is_reliable = _get_mx_provider(domain)
         if provider == "parked":
             logger.info("[%s] Skipping generic emails — domain is parked", company_name)
         elif is_domain_catchall:
-            for prefix in ("careers", "hiring", "hr"):
+            for prefix, conf in _GENERIC_PREFIXES:
                 if len(valid) >= MAX_EMAILS_PER_COMPANY:
                     break
                 candidate = f"{prefix}@{domain}"
@@ -568,13 +587,12 @@ async def find_contacts(company_name: str, company_url: str, job_description: st
                     valid.append({
                         "email": candidate, "name": "",
                         "title": f"{prefix.title()} Department",
-                        "confidence": 0.40, "source": "generic_catchall",
+                        "confidence": conf, "source": "generic_catchall",
                     })
                     valid_emails.add(candidate)
                     logger.info("[%s]   GENERIC CATCHALL: %s (won't bounce)", company_name, candidate)
-        elif is_reliable:
-            for prefix, conf in [("careers", 0.45), ("hiring", 0.45), ("hr", 0.40),
-                                  ("jobs", 0.40), ("talent", 0.40), ("recruit", 0.38)]:
+        else:
+            for prefix, conf in _GENERIC_PREFIXES:
                 if len(valid) >= MAX_EMAILS_PER_COMPANY:
                     break
                 candidate = f"{prefix}@{domain}"
@@ -588,24 +606,6 @@ async def find_contacts(company_name: str, company_url: str, job_description: st
                     })
                     valid_emails.add(candidate)
                     logger.info("[%s]   GENERIC VERIFIED: %s (provider=%s)", company_name, candidate, provider)
-        else:
-            for prefix, conf in [("careers", 0.40), ("hiring", 0.40), ("hr", 0.38),
-                                  ("jobs", 0.38)]:
-                if len(valid) >= MAX_EMAILS_PER_COMPANY:
-                    break
-                candidate = f"{prefix}@{domain}"
-                if candidate in valid_emails:
-                    continue
-                if _smtp_verify(candidate):
-                    valid.append({
-                        "email": candidate, "name": "",
-                        "title": f"{prefix.title()} Department",
-                        "confidence": conf, "source": "generic_job_email",
-                    })
-                    valid_emails.add(candidate)
-                    logger.info("[%s]   GENERIC VERIFIED: %s (provider=%s, unreliable)", company_name, candidate, provider)
-            if not any(c["source"].startswith("generic") for c in valid):
-                logger.info("[%s] Generic emails failed SMTP on %s provider", company_name, provider)
 
     if not valid:
         logger.info("[%s] No verified emails (found=%d, guessed=%d, catchall=%s)",
