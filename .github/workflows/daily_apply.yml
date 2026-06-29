@@ -20,29 +20,37 @@ jobs:
         pipeline_id: ['1', '2', '3', '4', '5', '6', '7']
     name: "Pipeline ${{ matrix.pipeline_id }}"
 
-    # Skip pipelines not matching manual input (if specific one chosen)
-    if: >-
-      github.event_name == 'schedule' ||
-      github.event.inputs.pipeline == 'all' ||
-      github.event.inputs.pipeline == matrix.pipeline_id
-
     steps:
+      - name: Check if pipeline should run
+        id: check
+        run: |
+          INPUT="${{ github.event.inputs.pipeline }}"
+          if [ -z "$INPUT" ] || [ "$INPUT" = "all" ] || [ "$INPUT" = "${{ matrix.pipeline_id }}" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@v4
+        if: steps.check.outputs.skip == 'false'
 
       - name: Set up Python
+        if: steps.check.outputs.skip == 'false'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
 
       - name: Install dependencies
+        if: steps.check.outputs.skip == 'false'
         run: pip install -r requirements.txt
 
       - name: Install Playwright browser (pipeline 6 only)
-        if: matrix.pipeline_id == '6'
+        if: steps.check.outputs.skip == 'false' && matrix.pipeline_id == '6'
         run: playwright install --with-deps chromium
 
       - name: "Run pipeline ${{ matrix.pipeline_id }}"
+        if: steps.check.outputs.skip == 'false'
         env:
           YOUR_NAME: ${{ secrets.YOUR_NAME }}
           YOUR_EMAIL: ${{ secrets.YOUR_EMAIL }}
