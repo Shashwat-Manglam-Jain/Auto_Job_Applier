@@ -248,37 +248,104 @@ async def _search_google_api(client: httpx.AsyncClient, query: str) -> list[dict
     return []
 
 
+_PAGE_KEYWORDS = {"team", "about", "contact", "people", "leadership",
+                   "founder", "hiring", "careers", "staff", "who-we-are"}
+
+
+def _find_promising_links(soup: BeautifulSoup, source: str) -> list[str]:
+    """Extract result URLs that likely contain contact info."""
+    links = []
+    for a in soup.select("a[href]"):
+        href = a.get("href", "")
+        if not href.startswith("http"):
+            continue
+        # Skip search engine internal links
+        if any(d in href for d in ("duckduckgo.com", "bing.com", "google.com",
+                                    "microsoft.com/en", "yahoo.com")):
+            continue
+        text = (a.get_text(strip=True) + " " + href).lower()
+        if any(kw in text for kw in _PAGE_KEYWORDS):
+            links.append(href)
+    return links
+
+
 async def _search_ddg(client: httpx.AsyncClient, query: str) -> list[dict]:
-    resp = await client.get(
-        "https://html.duckduckgo.com/html/",
-        params={"q": query},
-        headers=_random_headers(),
-        timeout=10,
-    )
-    if resp.status_code != 200:
-        return []
-    soup = BeautifulSoup(resp.text, "html.parser")
     contacts = []
-    for result in soup.select(".result__snippet, .result__title, .result__body"):
+    for attempt in range(2):
+        try:
+            resp = await client.get(
+                "https://html.duckduckgo.com/html/",
+                params={"q": query},
+                headers=_random_headers(),
+                timeout=12,
+            )
+            if resp.status_code != 200:
+                if attempt == 0:
+                    await asyncio.sleep(1)
+                    continue
+                return contacts
+            break
+        except Exception:
+            if attempt == 0:
+                await asyncio.sleep(1)
+                continue
+            return contacts
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    # Extract from snippets
+    for result in soup.select(".result__snippet, .result__title, .result__body, .result__a"):
         text = result.get_text(separator=" ", strip=True)
         contacts.extend(_extract_contacts_from_text(text, "duckduckgo"))
+    # Also extract from result URLs text
+    for a in soup.select("a.result__url"):
+        contacts.extend(_extract_contacts_from_text(a.get_text(strip=True), "duckduckgo"))
+
+    # Follow promising result links to scrape actual pages
+    promising = _find_promising_links(soup, "duckduckgo")
+    for url in promising[:3]:
+        page_contacts = await _fetch_page_emails(client, url)
+        contacts.extend(page_contacts)
+
     return contacts
 
 
 async def _search_bing(client: httpx.AsyncClient, query: str) -> list[dict]:
-    resp = await client.get(
-        "https://www.bing.com/search",
-        params={"q": query},
-        headers=_random_headers(),
-        timeout=10,
-    )
-    if resp.status_code != 200:
-        return []
-    soup = BeautifulSoup(resp.text, "html.parser")
     contacts = []
+    for attempt in range(2):
+        try:
+            resp = await client.get(
+                "https://www.bing.com/search",
+                params={"q": query},
+                headers=_random_headers(),
+                timeout=12,
+            )
+            if resp.status_code != 200:
+                if attempt == 0:
+                    await asyncio.sleep(1)
+                    continue
+                return contacts
+            break
+        except Exception:
+            if attempt == 0:
+                await asyncio.sleep(1)
+                continue
+            return contacts
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    # Extract from search result snippets
     for result in soup.select(".b_algo"):
         text = result.get_text(separator=" ", strip=True)
         contacts.extend(_extract_contacts_from_text(text, "bing"))
+    # Also check captions
+    for cap in soup.select(".b_caption p, .b_snippet"):
+        contacts.extend(_extract_contacts_from_text(cap.get_text(separator=" ", strip=True), "bing"))
+
+    # Follow promising result links to scrape actual pages
+    promising = _find_promising_links(soup, "bing")
+    for url in promising[:3]:
+        page_contacts = await _fetch_page_emails(client, url)
+        contacts.extend(page_contacts)
+
     return contacts
 
 

@@ -519,7 +519,7 @@ async def find_contacts(company_name: str, company_url: str, job_description: st
                 continue
             seen_names.add(name.lower())
             candidates = guess_emails(company_name, company_url, name)
-            for g in candidates[:3]:
+            for g in candidates[:6]:
                 if not _is_bad_email(g["email"]) and _email_matches_domain(g["email"], domain):
                     g["name"] = name
                     g["title"] = c.get("title", "")
@@ -532,7 +532,7 @@ async def find_contacts(company_name: str, company_url: str, job_description: st
                 continue
             seen_names.add(name.lower())
             candidates = guess_emails(company_name, company_url, name)
-            for g in candidates[:2]:
+            for g in candidates[:4]:
                 if not _is_bad_email(g["email"]) and _email_matches_domain(g["email"], domain):
                     g["name"] = name
                     g["title"] = c.get("title", "")
